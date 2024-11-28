@@ -8,8 +8,10 @@ from typing import Dict, Optional, Tuple, List, Union
 import cv2
 import numpy as np
 from cellpose import models
-from cellpose.transforms import normalize99
+from cellpose.models import CellposeModel
 from tifffile import tifffile
+
+from cell_tracking import CellTracker
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -43,23 +45,36 @@ class ProcessingParameters:
 
 
 class CellSegmentationPipeline:
-    def __init__(self, params: Optional[ProcessingParameters] = None, output_dir: Optional[Path] = None):
-        """Initialize the pipeline with processing parameters and output directory"""
-        self.params = params or ProcessingParameters()
+    def __init__(self, output_dir: Optional[Path] = None, model_path: str = None):
+        """Initialize the pipeline with processing parameters, output directory and model path"""
+        self.params = ProcessingParameters()
         self.output_dir = Path(output_dir) if output_dir else Path("./output")
         self.temp_dir = self.output_dir / "temp_frames"
         self.preprocessed_dir = self.output_dir / "preprocessed_frames"
-        # Move segmentation_dir to parent directory
         self.segmentation_dir = self.output_dir.parent / "segmentation_frames"
-        self.model = models.Cellpose(gpu=False, model_type="cyto3")
         self.results_cache = {}
 
-    def _setup_directories(self):
-        """Create necessary directories for output"""
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
-        self.preprocessed_dir.mkdir(parents=True, exist_ok=True)
-        self.segmentation_dir.mkdir(parents=True, exist_ok=True)
+        if model_path is None:
+            raise ValueError("model_path must be provided")
+
+        self.initialize_model(model_path=model_path)
+
+    def initialize_model(self, model_path: str) -> None:
+        """Initialize CellposeModel with a specific model path"""
+        logger.info(f"Loading model from: {model_path}")
+
+        try:
+            # Initialize with CellposeModel directly for custom model support
+            self.model = CellposeModel(
+                gpu=False,
+                pretrained_model=model_path,
+                net_avg=False
+            )
+            logger.info("Successfully loaded model")
+
+        except Exception as e:
+            logger.error(f"Failed to load model from {model_path}: {str(e)}")
+            raise
 
     def _save_segmentation_frame(self, frame_idx: int, preprocessed_image: np.ndarray,
                                  masks: np.ndarray, flows: List[np.ndarray],
@@ -69,12 +84,6 @@ class CellSegmentationPipeline:
         image_path = self.segmentation_dir / f"image_{frame_idx:04d}.tif"
         tifffile.imwrite(image_path, preprocessed_image)
 
-        # # Save masks
-        # tifffile.imwrite(
-        #     self.segmentation_dir / f"masks_{frame_idx:04d}.tif",
-        #     masks.astype(np.uint16)
-        # )
-
         # Create outlines
         from cellpose.utils import masks_to_outlines
         outlines = masks_to_outlines(masks)
@@ -82,10 +91,6 @@ class CellSegmentationPipeline:
         # Create random colors for cells
         ncells = len(np.unique(masks)[1:])  # number of cells
         colors = ((np.random.rand(ncells, 3) * 0.8 + 0.1) * 255).astype(np.uint8)
-
-        # Get model path - for Cellpose class it's in the models directory
-        import os
-        model_path = os.path.join(os.path.expanduser('~'), '.cellpose', 'models', 'cyto3')
 
         # Save in same format as GUI
         model_outputs = {
@@ -97,7 +102,7 @@ class CellSegmentationPipeline:
             'flows': flows,
             'ismanual': np.zeros(ncells, dtype=bool),
             'manual_changes': [],
-            'model_path': model_path,
+            'model_path': str(self.model.pretrained_model),
             'flow_threshold': 0.4,  # default value
             'cellprob_threshold': 0.0,  # default value
             'normalize_params': {
@@ -120,6 +125,104 @@ class CellSegmentationPipeline:
             self.segmentation_dir / f"image_{frame_idx:04d}_seg.npy",
             model_outputs
         )
+
+    def process_stack(self, image_stack: np.ndarray, save_intermediate: bool = True) -> Dict:
+        """Process an entire image stack with progressive saving"""
+        self._setup_directories()
+
+        results = {
+            'masks': [],
+            'flows': [],
+            'metadata': {
+                'parameters': self.params.__dict__,
+                'stack_shape': image_stack.shape,
+                'processed_frames': 0,
+                'failed_frames': [],
+                'output_directory': str(self.output_dir),
+                'preprocessed_directory': str(self.preprocessed_dir),
+                'segmentation_directory': str(self.segmentation_dir)
+            }
+        }
+
+        total_frames = image_stack.shape[0]
+
+        for frame_idx in range(total_frames):
+            logger.info(f"Processing frame {frame_idx + 1}/{total_frames}")
+
+            try:
+                # Preprocess frame
+                frame = image_stack[frame_idx]
+                preprocessed, preprocessing_steps = self.preprocess_frame(frame)
+
+                if save_intermediate:
+                    self._save_preprocessing_steps(
+                        frame_idx,
+                        *preprocessing_steps
+                    )
+                    self._save_preprocessed_frame(frame_idx, preprocessed)
+
+                # First pass segmentation with CellposeModel
+                output = self.model.eval(
+                    preprocessed,
+                    diameter=self.params.diameter,
+                    batch_size=8,
+                    channels=[0, 0],
+                    flow_threshold=self.params.initial_flow_threshold,
+                    cellprob_threshold=self.params.initial_cellprob_threshold,
+                    normalize=True,
+                    do_3D=False
+                )
+
+                # Unpack the output - CellposeModel.eval returns (masks, flows, styles)
+                masks, flows, styles = output
+                # Create placeholder for diams since we don't get it from CellposeModel
+                diams = np.array([self.params.diameter])
+
+                # Save segmentation frame and model outputs
+                self._save_segmentation_frame(frame_idx, preprocessed, masks, flows, styles, diams)
+
+                # Apply exclude mask
+                exclude_mask = self._create_exclude_mask(preprocessed)
+                masks = self._apply_exclude_mask(masks, exclude_mask)
+
+                if save_intermediate:
+                    self._save_frame(frame_idx, masks)
+
+                # Store results
+                results['masks'].append(masks)
+                results['flows'].append(flows)
+                results['metadata']['processed_frames'] += 1
+
+                if (frame_idx + 1) % 10 == 0:
+                    logger.info(f"Completed {frame_idx + 1}/{total_frames} frames")
+
+            except Exception as e:
+                logger.error(f"Error processing frame {frame_idx}: {str(e)}")
+                results['metadata']['failed_frames'].append(frame_idx)
+                continue
+
+        # Convert masks list to stack and save final result
+        masks_stack = np.stack(results['masks'], axis=0)
+        output_file = Path(self.output_dir).parent / 'segmentation.tif'
+        tifffile.imwrite(output_file, masks_stack.astype(np.uint16))
+
+        # Clean up temporary directories
+        if self.temp_dir.exists():
+            shutil.rmtree(self.temp_dir)
+        if self.preprocessed_dir.exists():
+            shutil.rmtree(self.preprocessed_dir)
+        if self.output_dir.exists():
+            shutil.rmtree(self.output_dir)
+
+        logger.info(f"Processing complete. Final segmentation saved to: {output_file}")
+        logger.info(f"Segmentation frames and model outputs saved in: {self.segmentation_dir}")
+        return results
+    def _setup_directories(self):
+        """Create necessary directories for output"""
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.preprocessed_dir.mkdir(parents=True, exist_ok=True)
+        self.segmentation_dir.mkdir(parents=True, exist_ok=True)
 
     def _scale_to_8bit(self, image: np.ndarray) -> np.ndarray:
         """Scale image to 8-bit with proper normalization"""
@@ -258,105 +361,6 @@ class CellSegmentationPipeline:
         return final_enhanced, (original, scaled, pre_clipped, median_filtered,
                                 enhanced, final_enhanced, exclude_mask_vis)
 
-    def process_stack(self, image_stack: np.ndarray,
-                      save_intermediate: bool = True) -> Dict:
-        """Process an entire image stack with progressive saving"""
-        self._setup_directories()
-
-        results = {
-            'masks': [],
-            'flows': [],
-            'metadata': {
-                'parameters': self.params.__dict__,
-                'stack_shape': image_stack.shape,
-                'processed_frames': 0,
-                'failed_frames': [],
-                'output_directory': str(self.output_dir),
-                'preprocessed_directory': str(self.preprocessed_dir),
-                'segmentation_directory': str(self.segmentation_dir)
-            }
-        }
-
-        total_frames = image_stack.shape[0]
-
-        for frame_idx in range(total_frames):
-            logger.info(f"Processing frame {frame_idx + 1}/{total_frames}")
-
-            try:
-                # Preprocess frame
-                frame = image_stack[frame_idx]
-                preprocessed, preprocessing_steps = self.preprocess_frame(frame)
-
-                # Save preprocessing steps
-                if save_intermediate:
-                    self._save_preprocessing_steps(
-                        frame_idx,
-                        *preprocessing_steps  # Unpack all preprocessing steps
-                    )
-                    self._save_preprocessed_frame(frame_idx, preprocessed)
-
-                # First pass segmentation with full model outputs
-                masks, flows, styles, diams = self.model.eval(
-                    preprocessed,
-                    diameter=self.params.diameter,
-                    batch_size=8,
-                    channels=[0, 0],
-                    normalize=True,
-                    do_3D=False
-                )
-
-                # Save segmentation frame and model outputs
-                self._save_segmentation_frame(frame_idx, preprocessed, masks, flows, styles, diams)
-
-                # Apply exclude mask
-                exclude_mask = self._create_exclude_mask(preprocessed)
-                masks = self._apply_exclude_mask(masks, exclude_mask)
-
-                # Save individual frame result
-                if save_intermediate:
-                    self._save_frame(frame_idx, masks)
-                    self._save_intermediate_results(frame_idx, masks, flows)
-
-                # Prepare temporal context
-                context = {
-                    'prev_masks': results['masks'][-1] if results['masks'] else None,
-                    'frame_index': frame_idx
-                }
-
-                # Second pass segmentation
-                refined_masks = self.refined_segmentation(preprocessed, context)
-
-                results['masks'].append(refined_masks)
-                results['flows'].append(flows)
-                results['metadata']['processed_frames'] += 1
-
-                if (frame_idx + 1) % 10 == 0:
-                    logger.info(f"Completed {frame_idx + 1}/{total_frames} frames")
-
-            except Exception as e:
-                logger.error(f"Error processing frame {frame_idx}: {str(e)}")
-                logger.error(f"Frame shape: {frame.shape if 'frame' in locals() else 'Not created'}")
-                logger.error(f"Preprocessed shape: {preprocessed.shape if 'preprocessed' in locals() else 'Not created'}")
-                results['metadata']['failed_frames'].append(frame_idx)
-                continue
-
-        # Convert masks list to stack and save final result
-        masks_stack = np.stack(results['masks'], axis=0)
-        output_file = Path(self.output_dir).parent / 'segmentation.tif'
-        tifffile.imwrite(output_file, masks_stack.astype(np.uint16))
-
-        # Clean up all temporary directories including segmentation_output
-        if self.temp_dir.exists():
-            shutil.rmtree(self.temp_dir)
-        if self.preprocessed_dir.exists():
-            shutil.rmtree(self.preprocessed_dir)
-        # Clean up the entire output directory
-        if self.output_dir.exists():
-            shutil.rmtree(self.output_dir)
-
-        logger.info(f"Processing complete. Final segmentation saved to: {output_file}")
-        logger.info(f"Segmentation frames and model outputs saved in: {self.segmentation_dir}")
-        return results
 
     def _combine_frames_to_stack(self):
         """Combine all temporary frames into a single stack"""
@@ -380,11 +384,6 @@ class CellSegmentationPipeline:
         shutil.rmtree(self.temp_dir)
 
         return stack_path
-
-    def initialize_model(self, model_type: str = "cyto3", gpu: bool = True) -> None:
-        """Initialize the Cellpose model"""
-        logger.info(f"Initializing Cellpose model: {model_type}")
-        self.model = models.Cellpose(gpu=gpu, model_type=model_type)
 
     def load_image_stack(self, path: Union[str, Path]) -> np.ndarray:
         path = Path(path)
@@ -428,15 +427,19 @@ class CellSegmentationPipeline:
         return masks, flows
 
     def refined_segmentation(self, image: np.ndarray, context: Dict) -> np.ndarray:
-        """Second pass: Refined segmentation using temporal context"""
+        """Second pass: Refined segmentation using temporal context and tracking"""
         if self.model is None:
             self.initialize_model()
 
         prev_masks = context.get('prev_masks', None)
 
+        # Initial segmentation
         masks, flows, styles, diams = self.model.eval(
             image,
             diameter=self.params.diameter,
+            flow_threshold=self.params.refined_flow_threshold,
+            cellprob_threshold=self.params.refined_cellprob_threshold,
+            min_size=self.params.refined_min_size,
             batch_size=8,
             channels=[0, 0],
             normalize=True,
@@ -447,16 +450,54 @@ class CellSegmentationPipeline:
         exclude_mask = self._create_exclude_mask(image)
         masks = self._apply_exclude_mask(masks, exclude_mask)
 
+        # Apply temporal consistency if we have previous masks
         if prev_masks is not None:
             masks = self._apply_temporal_consistency(masks, prev_masks)
 
         return masks
 
-    def _apply_temporal_consistency(self, current_masks: np.ndarray,
-                                    reference_masks: np.ndarray) -> np.ndarray:
-        """Apply temporal consistency constraints"""
-        # Placeholder for temporal consistency logic
-        return current_masks
+    def _apply_temporal_consistency(self, current_masks: np.ndarray, reference_masks: np.ndarray) -> np.ndarray:
+        """
+        Apply temporal consistency to segmentation using cell tracking.
+
+        Parameters:
+        -----------
+        current_masks : np.ndarray
+            Current frame's cell masks
+        reference_masks : np.ndarray
+            Previous frame's cell masks
+
+        Returns:
+        --------
+        np.ndarray
+            Temporally consistent masks
+        """
+        # Initialize CellTracker with default config if not already present
+        if not hasattr(self, 'tracker'):
+            from dataclasses import dataclass
+
+            @dataclass
+            class TrackingParameters:
+                min_overlap_ratio: float = 0.3
+                max_displacement: float = 50.0
+                min_cell_size: int = 25
+                enable_gap_closing: bool = False
+                max_frame_gap: int = 3
+
+            @dataclass
+            class AnalysisConfig:
+                tracking_params: TrackingParameters = TrackingParameters()
+
+            self.tracker = CellTracker(AnalysisConfig())
+
+        # Create mini-stack of reference and current frame
+        mini_stack = np.stack([reference_masks, current_masks])
+
+        # Track cells in this mini-stack
+        tracked_masks = self.tracker.track_cells(mini_stack)
+
+        # Return the tracked version of the current frame
+        return tracked_masks[1]
 
     def _save_intermediate_results(self, frame_idx: int,
                                    masks: np.ndarray,
@@ -498,13 +539,10 @@ class CellSegmentationPipeline:
 
 def main(path):
     """Example usage of the pipeline"""
-    # Create pipeline with default parameters and specify output directory
-    pipeline = CellSegmentationPipeline(output_dir="D:/2024-11-27/position1/segmentation_output")
-
-    custom_model_path = "D:/cellpose_models/cyto3_xenopus"  # full path to model
-    pipeline.model = models.Cellpose(
-        gpu=False,
-        model_type=custom_model_path  # Changed this line
+    custom_model_path = "D:/cellpose_models/cyto3_xenopus1"
+    pipeline = CellSegmentationPipeline(
+        output_dir="D:/2024-11-27/position0/segmentation_output",
+        model_path=custom_model_path
     )
 
     # Load image stack
@@ -514,5 +552,5 @@ def main(path):
     results = pipeline.process_stack(image_stack)
 
 if __name__ == "__main__":
-    path = "D:/2024-11-27/position1/registered_membrane_slice_downsized.tif"
+    path = "D:/2024-11-27/position0/registered_membrane_slice_downsized.tif"
     main(path)
