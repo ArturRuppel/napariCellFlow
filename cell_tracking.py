@@ -1,10 +1,7 @@
-import numpy as np
-import numpy.typing as npt
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Set
 import logging
-import tifffile
+from typing import Dict, List, Tuple, Set
+
+import numpy as np
 from skimage.measure import regionprops
 
 from structure import TrackingParameters, AnalysisConfig

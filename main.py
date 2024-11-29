@@ -1,5 +1,6 @@
 import json
 import logging
+import os.path
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ from cellpose.models import CellposeModel
 from tifffile import tifffile
 
 from cell_tracking import CellTracker
+from structure import AnalysisConfig
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,14 +30,14 @@ class ProcessingParameters:
 
     # Intensity clipping parameters
     initial_lower_percentile: float = 1.0
-    final_lower_percentile: float = 50
+    final_lower_percentile: float = 30
     final_upper_percentile: float = 99.0
 
     # Cell detection parameters
     black_region_threshold: int = 5  # Intensity threshold for excluding dark regions
 
     # Cellpose parameters
-    diameter = 100
+    diameter = 110
     initial_flow_threshold: float = 0.6
     refined_flow_threshold: float = 0.4
     initial_cellprob_threshold: float = 0.3
@@ -43,6 +45,8 @@ class ProcessingParameters:
     initial_min_size: int = 25
     refined_min_size: int = 25
 
+    # Tracking parameters
+    min_overlap_threshold: float = 0.9  # Minimum overlap ratio required for temporal consistency
 
 class CellSegmentationPipeline:
     def __init__(self, output_dir: Optional[Path] = None, model_path: str = None):
@@ -68,7 +72,6 @@ class CellSegmentationPipeline:
             self.model = CellposeModel(
                 gpu=False,
                 pretrained_model=model_path,
-                net_avg=False
             )
             logger.info("Successfully loaded model")
 
@@ -126,97 +129,72 @@ class CellSegmentationPipeline:
             model_outputs
         )
 
-    def process_stack(self, image_stack: np.ndarray, save_intermediate: bool = True) -> Dict:
-        """Process an entire image stack with progressive saving"""
-        self._setup_directories()
+    def _check_temporal_consistency(self, tracked_window: np.ndarray) -> bool:
+        """
+        Check temporal consistency of tracked cells based on average overlap between frames.
 
-        results = {
-            'masks': [],
-            'flows': [],
-            'metadata': {
-                'parameters': self.params.__dict__,
-                'stack_shape': image_stack.shape,
-                'processed_frames': 0,
-                'failed_frames': [],
-                'output_directory': str(self.output_dir),
-                'preprocessed_directory': str(self.preprocessed_dir),
-                'segmentation_directory': str(self.segmentation_dir)
-            }
-        }
+        Parameters:
+        -----------
+        tracked_window : np.ndarray
+            3D array of tracked cell masks, shape (t, y, x)
 
-        total_frames = image_stack.shape[0]
+        Returns:
+        --------
+        bool
+            True if tracking is temporally consistent, False otherwise
+        """
 
-        for frame_idx in range(total_frames):
-            logger.info(f"Processing frame {frame_idx + 1}/{total_frames}")
+        def calculate_frame_overlaps(frame1: np.ndarray, frame2: np.ndarray) -> float:
+            """Calculate average overlap ratio between cells in consecutive frames."""
+            overlap_ratios = []
 
-            try:
-                # Preprocess frame
-                frame = image_stack[frame_idx]
-                preprocessed, preprocessing_steps = self.preprocess_frame(frame)
+            # Get unique cell IDs in both frames (excluding background 0)
+            cells1 = set(np.unique(frame1)) - {0}
+            cells2 = set(np.unique(frame2)) - {0}
 
-                if save_intermediate:
-                    self._save_preprocessing_steps(
-                        frame_idx,
-                        *preprocessing_steps
-                    )
-                    self._save_preprocessed_frame(frame_idx, preprocessed)
+            # Calculate overlap for each cell that exists in both frames
+            for cell_id in cells1 & cells2:
+                # Get binary masks for the cell in both frames
+                mask1 = frame1 == cell_id
+                mask2 = frame2 == cell_id
 
-                # First pass segmentation with CellposeModel
-                output = self.model.eval(
-                    preprocessed,
-                    diameter=self.params.diameter,
-                    batch_size=8,
-                    channels=[0, 0],
-                    flow_threshold=self.params.initial_flow_threshold,
-                    cellprob_threshold=self.params.initial_cellprob_threshold,
-                    normalize=True,
-                    do_3D=False
-                )
+                # Calculate intersection and union
+                intersection = np.sum(mask1 & mask2)
+                union = np.sum(mask1 | mask2)
 
-                # Unpack the output - CellposeModel.eval returns (masks, flows, styles)
-                masks, flows, styles = output
-                # Create placeholder for diams since we don't get it from CellposeModel
-                diams = np.array([self.params.diameter])
+                if union > 0:
+                    # Calculate IoU (Intersection over Union)
+                    overlap_ratio = intersection / union
+                    overlap_ratios.append(overlap_ratio)
 
-                # Save segmentation frame and model outputs
-                self._save_segmentation_frame(frame_idx, preprocessed, masks, flows, styles, diams)
+            # If no overlaps found, return 0
+            if not overlap_ratios:
+                return 0.0
 
-                # Apply exclude mask
-                exclude_mask = self._create_exclude_mask(preprocessed)
-                masks = self._apply_exclude_mask(masks, exclude_mask)
+            # Return average overlap ratio
+            return np.mean(overlap_ratios)
 
-                if save_intermediate:
-                    self._save_frame(frame_idx, masks)
+        # Calculate overlaps between consecutive frames
+        frame_overlaps = []
+        for i in range(len(tracked_window) - 1):
+            overlap = calculate_frame_overlaps(
+                tracked_window[i],
+                tracked_window[i + 1]
+            )
+            frame_overlaps.append(overlap)
 
-                # Store results
-                results['masks'].append(masks)
-                results['flows'].append(flows)
-                results['metadata']['processed_frames'] += 1
+            # Early exit if any consecutive frames have very poor overlap
+            if overlap < self.params.min_overlap_threshold:
+                logger.debug(f"Low overlap {overlap:.3f} detected between frames {i} and {i + 1}")
+                return False
 
-                if (frame_idx + 1) % 10 == 0:
-                    logger.info(f"Completed {frame_idx + 1}/{total_frames} frames")
+        # Calculate average overlap across all frame pairs
+        avg_overlap = np.mean(frame_overlaps)
+        logger.debug(f"Average overlap across window: {avg_overlap:.3f}")
 
-            except Exception as e:
-                logger.error(f"Error processing frame {frame_idx}: {str(e)}")
-                results['metadata']['failed_frames'].append(frame_idx)
-                continue
+        # Return True if average overlap is above threshold
+        return avg_overlap >= self.params.min_overlap_threshold
 
-        # Convert masks list to stack and save final result
-        masks_stack = np.stack(results['masks'], axis=0)
-        output_file = Path(self.output_dir).parent / 'segmentation.tif'
-        tifffile.imwrite(output_file, masks_stack.astype(np.uint16))
-
-        # Clean up temporary directories
-        if self.temp_dir.exists():
-            shutil.rmtree(self.temp_dir)
-        if self.preprocessed_dir.exists():
-            shutil.rmtree(self.preprocessed_dir)
-        if self.output_dir.exists():
-            shutil.rmtree(self.output_dir)
-
-        logger.info(f"Processing complete. Final segmentation saved to: {output_file}")
-        logger.info(f"Segmentation frames and model outputs saved in: {self.segmentation_dir}")
-        return results
     def _setup_directories(self):
         """Create necessary directories for output"""
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -318,49 +296,6 @@ class CellSegmentationPipeline:
         """
         return (image <= threshold).astype(np.uint8)
 
-    def preprocess_frame(self, image: np.ndarray) -> Tuple[np.ndarray, Tuple[np.ndarray, ...]]:
-        """Apply preprocessing steps to a single frame with proper intensity scaling"""
-        # Store original for debugging
-        original = image.copy()
-
-        # Proper scaling to 8-bit
-        scaled = self._scale_to_8bit(image)  # This already returns uint8
-
-        # Initial percentile-based clipping
-        lower_percentile = np.percentile(scaled, self.params.initial_lower_percentile)
-        pre_clipped = np.clip(scaled, lower_percentile, 255).astype(np.uint8)
-
-        # Apply median filter for noise reduction
-        median_filtered = cv2.medianBlur(pre_clipped, self.params.median_filter_size)
-
-        # CLAHE for contrast enhancement
-        clahe = cv2.createCLAHE(
-            clipLimit=self.params.clahe_clip_limit,
-            tileGridSize=(self.params.clahe_grid_size, self.params.clahe_grid_size)
-        )
-        enhanced = clahe.apply(median_filtered)
-
-        # Final percentile-based clipping
-        final_lower_percentile = np.percentile(enhanced, self.params.final_lower_percentile)
-        final_upper_percentile = np.percentile(enhanced, self.params.final_upper_percentile)
-        final_enhanced = np.clip(enhanced, final_lower_percentile, final_upper_percentile)
-
-        # Rescale to full range
-        if final_upper_percentile > final_lower_percentile:
-            final_enhanced = ((final_enhanced - final_lower_percentile) *
-                              (255.0 / (final_upper_percentile - final_lower_percentile))).clip(0, 255)
-
-        final_enhanced = final_enhanced.astype(np.uint8)
-
-        # Create exclude mask for very dark regions
-        exclude_mask = self._create_exclude_mask(final_enhanced)
-
-        # Convert exclude mask to visible format (0 -> black, 1 -> white)
-        exclude_mask_vis = exclude_mask * 255
-
-        return final_enhanced, (original, scaled, pre_clipped, median_filtered,
-                                enhanced, final_enhanced, exclude_mask_vis)
-
 
     def _combine_frames_to_stack(self):
         """Combine all temporary frames into a single stack"""
@@ -385,76 +320,6 @@ class CellSegmentationPipeline:
 
         return stack_path
 
-    def load_image_stack(self, path: Union[str, Path]) -> np.ndarray:
-        path = Path(path)
-        logger.info(f"Loading image stack from: {path}")
-
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-
-        if path.suffix.lower() not in ['.tif', '.tiff']:
-            raise ValueError(f"Expected .tif file, got: {path.suffix}")
-
-        # Load the stack
-        stack = tifffile.imread(path)
-
-        # Verify dimensions
-        if stack.ndim != 3:
-            raise ValueError(f"Expected 3 dimensions (t,x,y), got {stack.ndim} dimensions")
-
-        logger.info(f"Loaded stack with shape: {stack.shape}")
-        return stack
-
-    def conservative_segmentation(self, image: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
-        """First pass: Conservative cell segmentation"""
-        if self.model is None:
-            self.initialize_model()
-
-        # Run Cellpose with documented parameters
-        masks, flows, styles, diams = self.model.eval(
-            image,
-            diameter=self.params.diameter,
-            batch_size=8,
-            channels=[0, 0],
-            normalize=True,
-            do_3D=False
-        )
-
-        # Create and apply exclude mask post-segmentation
-        exclude_mask = self._create_exclude_mask(image)
-        masks = self._apply_exclude_mask(masks, exclude_mask)
-
-        return masks, flows
-
-    def refined_segmentation(self, image: np.ndarray, context: Dict) -> np.ndarray:
-        """Second pass: Refined segmentation using temporal context and tracking"""
-        if self.model is None:
-            self.initialize_model()
-
-        prev_masks = context.get('prev_masks', None)
-
-        # Initial segmentation
-        masks, flows, styles, diams = self.model.eval(
-            image,
-            diameter=self.params.diameter,
-            flow_threshold=self.params.refined_flow_threshold,
-            cellprob_threshold=self.params.refined_cellprob_threshold,
-            min_size=self.params.refined_min_size,
-            batch_size=8,
-            channels=[0, 0],
-            normalize=True,
-            do_3D=False
-        )
-
-        # Create and apply exclude mask post-segmentation
-        exclude_mask = self._create_exclude_mask(image)
-        masks = self._apply_exclude_mask(masks, exclude_mask)
-
-        # Apply temporal consistency if we have previous masks
-        if prev_masks is not None:
-            masks = self._apply_temporal_consistency(masks, prev_masks)
-
-        return masks
 
     def _apply_temporal_consistency(self, current_masks: np.ndarray, reference_masks: np.ndarray) -> np.ndarray:
         """
@@ -509,6 +374,252 @@ class CellSegmentationPipeline:
             'timestamp': np.datetime64('now')
         }
 
+    def preprocess_frame(self, image: np.ndarray) -> Tuple[np.ndarray, Tuple[np.ndarray, ...]]:
+        """Apply preprocessing steps to a single frame with proper intensity scaling"""
+        # Store original for debugging
+        original = image.copy()
+
+        # Proper scaling to 8-bit
+        scaled = self._scale_to_8bit(image)  # This already returns uint8
+
+        # Initial percentile-based clipping
+        lower_percentile = np.percentile(scaled, self.params.initial_lower_percentile)
+        pre_clipped = np.clip(scaled, lower_percentile, 255).astype(np.uint8)
+
+        # Apply median filter for noise reduction
+        median_filtered = cv2.medianBlur(pre_clipped, self.params.median_filter_size)
+
+        # CLAHE for contrast enhancement
+        clahe = cv2.createCLAHE(
+            clipLimit=self.params.clahe_clip_limit,
+            tileGridSize=(self.params.clahe_grid_size, self.params.clahe_grid_size)
+        )
+        enhanced = clahe.apply(median_filtered)
+
+        # Final percentile-based clipping
+        final_lower_percentile = np.percentile(enhanced, self.params.final_lower_percentile)
+        final_upper_percentile = np.percentile(enhanced, self.params.final_upper_percentile)
+        final_enhanced = np.clip(enhanced, final_lower_percentile, final_upper_percentile)
+
+        # Rescale to full range
+        if final_upper_percentile > final_lower_percentile:
+            final_enhanced = ((final_enhanced - final_lower_percentile) *
+                              (255.0 / (final_upper_percentile - final_lower_percentile))).clip(0, 255)
+
+        final_enhanced = final_enhanced.astype(np.uint8)
+
+        # Create exclude mask for very dark regions
+        exclude_mask = self._create_exclude_mask(final_enhanced)
+
+        # Convert exclude mask to visible format (0 -> black, 1 -> white)
+        exclude_mask_vis = exclude_mask * 255
+
+        return final_enhanced, (original, scaled, pre_clipped, median_filtered,
+                                enhanced, final_enhanced, exclude_mask_vis)
+
+    def load_image_stack(self, path: Union[str, Path]) -> np.ndarray:
+        path = Path(path)
+        logger.info(f"Loading image stack from: {path}")
+
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        if path.suffix.lower() not in ['.tif', '.tiff']:
+            raise ValueError(f"Expected .tif file, got: {path.suffix}")
+
+        # Load the stack
+        stack = tifffile.imread(path)
+
+        # Verify dimensions
+        if stack.ndim != 3:
+            raise ValueError(f"Expected 3 dimensions (t,x,y), got {stack.ndim} dimensions")
+
+        logger.info(f"Loaded stack with shape: {stack.shape}")
+        return stack
+
+    def process_stack(self, image_stack: np.ndarray, save_intermediate: bool = True) -> Dict:
+        """Process an image stack with sliding window tracking for temporal consistency"""
+        self._setup_directories()
+        window_size = 3  # Sliding window of 3 frames
+        max_attempts = 3  # Maximum number of segmentation attempts per frame
+
+        results = {
+            'masks': [],
+            'flows': [],
+            'metadata': {
+                'parameters': self.params.__dict__,
+                'stack_shape': image_stack.shape,
+                'processed_frames': 0,
+                'failed_frames': [],
+                'resegmented_frames': [],
+                'output_directory': str(self.output_dir),
+                'preprocessed_directory': str(self.preprocessed_dir),
+                'segmentation_directory': str(self.segmentation_dir)
+            }
+        }
+
+        total_frames = image_stack.shape[0]
+        processed_masks = []
+
+        # Process first frame normally
+        frame = image_stack[0]
+        preprocessed, preprocessing_steps = self.preprocess_frame(frame)
+        masks, flows, styles = self.model.eval(
+            preprocessed,
+            diameter=self.params.diameter,
+            batch_size=8,
+            channels=[0, 0],
+            flow_threshold=self.params.initial_flow_threshold,
+            cellprob_threshold=self.params.initial_cellprob_threshold,
+            normalize=True,
+            do_3D=False
+        )
+        exclude_mask = self._create_exclude_mask(preprocessed)
+        masks = self._apply_exclude_mask(masks, exclude_mask)
+        processed_masks.append(masks)
+        results['masks'].append(masks)
+        results['flows'].append(flows)
+        results['metadata']['processed_frames'] += 1
+
+        if save_intermediate:
+            self._save_frame(0, masks)
+            self._save_preprocessing_steps(0, *preprocessing_steps)
+            self._save_segmentation_frame(0, preprocessed, masks, flows, styles, np.array([self.params.diameter]))
+
+        # Initialize tracker
+        tracker = CellTracker(AnalysisConfig())
+
+        # Process remaining frames with sliding window
+        for frame_idx in range(1, total_frames):
+            logger.info(f"Processing frame {frame_idx + 1}/{total_frames}")
+
+            try:
+                # Get current frame
+                frame = image_stack[frame_idx]
+                preprocessed, preprocessing_steps = self.preprocess_frame(frame)
+
+                # Initial segmentation
+                current_masks = None
+                attempt = 0
+                consistent = False
+
+                while not consistent and attempt < max_attempts:
+                    # Adjust segmentation parameters based on attempt number
+                    flow_threshold = self.params.initial_flow_threshold - (0.1 * attempt)
+                    cellprob_threshold = self.params.initial_cellprob_threshold - (0.1 * attempt)
+                    diameter = self.params.diameter + (10 * attempt)
+                    # Segment current frame
+                    masks, flows, styles = self.model.eval(
+                        preprocessed,
+                        diameter=diameter,
+                        batch_size=8,
+                        channels=[0, 0],
+                        flow_threshold=flow_threshold,
+                        cellprob_threshold=cellprob_threshold,
+                        normalize=True,
+                        do_3D=False
+                    )
+
+                    # Apply exclude mask
+                    exclude_mask = self._create_exclude_mask(preprocessed)
+                    current_masks = self._apply_exclude_mask(masks, exclude_mask)
+
+                    # Create sliding window for tracking
+                    window_start = max(0, frame_idx - window_size + 1)
+                    window_frames = processed_masks[window_start:] + [current_masks]
+                    window_stack = np.stack(window_frames)
+
+                    # Track cells in window
+                    tracked_window = tracker.track_cells(window_stack)
+
+                    # Check temporal consistency
+                    consistent = self._check_temporal_consistency(tracked_window)
+
+                    if not consistent:
+                        attempt += 1
+                        logger.info(f"Inconsistent tracking detected, attempt {attempt}")
+                        if attempt == max_attempts:
+                            logger.warning(f"Max attempts reached for frame {frame_idx}")
+                            results['metadata']['failed_frames'].append(frame_idx)
+                        else:
+                            results['metadata']['resegmented_frames'].append(frame_idx)
+
+                # Save final result for this frame - use the last frame from tracked window
+                current_masks = tracked_window[-1]
+                processed_masks.append(current_masks)
+                results['masks'].append(current_masks)
+                results['flows'].append(flows)
+                results['metadata']['processed_frames'] += 1
+
+                if save_intermediate:
+                    self._save_frame(frame_idx, current_masks)
+                    self._save_preprocessing_steps(frame_idx, *preprocessing_steps)
+                    self._save_segmentation_frame(frame_idx, preprocessed, current_masks, flows, styles, np.array([self.params.diameter]))
+
+            except Exception as e:
+                logger.error(f"Error processing frame {frame_idx}: {str(e)}")
+                results['metadata']['failed_frames'].append(frame_idx)
+                continue
+
+        # Convert masks list to stack and save final result
+        masks_stack = np.stack(results['masks'], axis=0)
+        output_file = Path(self.output_dir).parent / 'segmentation.tif'
+        tifffile.imwrite(output_file, masks_stack.astype(np.uint16))
+
+        logger.info(f"Processing complete. Final segmentation saved to: {output_file}")
+        return results
+
+    def conservative_segmentation(self, image: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
+        """First pass: Conservative cell segmentation"""
+        if self.model is None:
+            self.initialize_model()
+
+        # Run Cellpose with documented parameters
+        masks, flows, styles = self.model.eval(
+            image,
+            diameter=self.params.diameter,
+            batch_size=8,
+            channels=[0, 0],
+            normalize=True,
+            do_3D=False
+        )
+
+        # Create and apply exclude mask post-segmentation
+        exclude_mask = self._create_exclude_mask(image)
+        masks = self._apply_exclude_mask(masks, exclude_mask)
+
+        return masks, flows
+
+    def refined_segmentation(self, image: np.ndarray, context: Dict) -> np.ndarray:
+        """Second pass: Refined segmentation using temporal context and tracking"""
+        if self.model is None:
+            self.initialize_model()
+
+        prev_masks = context.get('prev_masks', None)
+
+        # Initial segmentation
+        masks, flows, styles = self.model.eval(
+            image,
+            diameter=self.params.diameter,
+            flow_threshold=self.params.refined_flow_threshold,
+            cellprob_threshold=self.params.refined_cellprob_threshold,
+            min_size=self.params.refined_min_size,
+            batch_size=8,
+            channels=[0, 0],
+            normalize=True,
+            do_3D=False
+        )
+
+        # Create and apply exclude mask post-segmentation
+        exclude_mask = self._create_exclude_mask(image)
+        masks = self._apply_exclude_mask(masks, exclude_mask)
+
+        # Apply temporal consistency if we have previous masks
+        if prev_masks is not None:
+            masks = self._apply_temporal_consistency(masks, prev_masks)
+
+        return masks
+
     def save_results(self, results: Dict, output_path: Path) -> None:
         """Save processing results"""
         output_path = Path(output_path)
@@ -537,20 +648,22 @@ class CellSegmentationPipeline:
 
         return results
 
-def main(path):
+def main(path, filename, model_path):
     """Example usage of the pipeline"""
-    custom_model_path = "D:/cellpose_models/cyto3_xenopus1"
     pipeline = CellSegmentationPipeline(
-        output_dir="D:/2024-11-27/position0/segmentation_output",
-        model_path=custom_model_path
+        output_dir=os.path.join(path, "segmentation_output"),
+        model_path=model_path
     )
 
     # Load image stack
-    image_stack = pipeline.load_image_stack(path)
+    image_stack = pipeline.load_image_stack(os.path.join(path, filename))
 
     # Process the stack
     results = pipeline.process_stack(image_stack)
 
 if __name__ == "__main__":
-    path = "D:/2024-11-27/position0/registered_membrane_slice_downsized.tif"
-    main(path)
+    path = "D:/2024-11-27/position5/"
+    filename = "registered_membrane_slice_downsized.tif"
+    model_path = "D:/cellpose_models/cyto3_xenopus1"
+
+    main(path, filename, model_path)
