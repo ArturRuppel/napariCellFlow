@@ -5,6 +5,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Union
+import copy
 
 import cv2
 import numpy as np
@@ -25,7 +26,7 @@ class ProcessingParameters:
     """Parameters for image processing and segmentation"""
     # Preprocessing parameters
     median_filter_size: int = 7
-    clahe_clip_limit: float = 4
+    clahe_clip_limit: float = 16
     clahe_grid_size: int = 16
 
     # Intensity clipping parameters
@@ -34,19 +35,17 @@ class ProcessingParameters:
     final_upper_percentile: float = 99.0
 
     # Cell detection parameters
-    black_region_threshold: int = 5  # Intensity threshold for excluding dark regions
+    black_region_threshold: int = 3  # Intensity threshold for excluding dark regions
 
     # Cellpose parameters
-    diameter = 110
-    initial_flow_threshold: float = 0.6
-    refined_flow_threshold: float = 0.4
-    initial_cellprob_threshold: float = 0.3
-    refined_cellprob_threshold: float = -0.1
-    initial_min_size: int = 25
-    refined_min_size: int = 25
+    diameter = 95
+    flow_threshold: float = 0.6
+    cellprob_threshold: float = 0.3
+    min_size: int = 25
 
     # Tracking parameters
-    min_overlap_threshold: float = 0.9  # Minimum overlap ratio required for temporal consistency
+    min_overlap_threshold: float = 0.8 # Minimum overlap ratio required for temporal consistency
+
 
 class CellSegmentationPipeline:
     def __init__(self, output_dir: Optional[Path] = None, model_path: str = None):
@@ -63,6 +62,176 @@ class CellSegmentationPipeline:
 
         self.initialize_model(model_path=model_path)
 
+    def _get_parameter_variations(self, base_params: ProcessingParameters) -> List[ProcessingParameters]:
+        """Generate parameter variations for retry attempts"""
+        variations = []
+
+        # Original parameters
+        variations.append(base_params)
+
+        # Variation factors for different intensity levels
+        variation_factors = [
+            (0.8, 0.8, 0.85),  # More sensitive
+            (0.9, 0.9, 0.925),  # Slightly more sensitive
+            (1.1, 1.1, 1.075),  # Slightly less sensitive
+            (1.2, 1.2, 1.15),  # Less sensitive
+        ]
+
+        for flow_factor, prob_factor, diameter_factor in variation_factors:
+            var = copy.deepcopy(base_params)
+
+            # Vary flow threshold
+            var.flow_threshold = base_params.flow_threshold * flow_factor
+
+            # Vary cellprob threshold
+            var.cellprob_threshold = base_params.cellprob_threshold * prob_factor
+
+            # Vary diameter (convert to int since it needs to be whole number)
+            var.diameter = int(base_params.diameter * diameter_factor)
+
+            # Vary min_size proportionally with diameter change
+            var.min_size = int(base_params.min_size * diameter_factor)
+
+            # Adjust overlap threshold inversely - when we're more sensitive to detection,
+            # we should be more strict about overlap
+            if flow_factor < 1:
+                var.min_overlap_threshold = base_params.min_overlap_threshold * 1.1
+            else:
+                var.min_overlap_threshold = base_params.min_overlap_threshold * 0.9
+
+            variations.append(var)
+
+            logger.debug(f"Created parameter variation: "
+                         f"flow_threshold={var.flow_threshold:.3f}, "
+                         f"cellprob_threshold={var.cellprob_threshold:.3f}, "
+                         f"diameter={var.diameter}, "
+                         f"min_size={var.min_size}, "
+                         f"min_overlap_threshold={var.min_overlap_threshold:.3f}")
+
+        return variations
+
+    def process_stack(self, image_stack: np.ndarray, save_intermediate: bool = True) -> Dict:
+        """Process an image stack with optimized parameter selection for temporal consistency"""
+        self._setup_directories()
+        window_size = 3  # Sliding window size for tracking
+
+        results = {
+            'masks': [],
+            'flows': [],
+            'metadata': {
+                'parameters': self.params.__dict__,
+                'stack_shape': image_stack.shape,
+                'processed_frames': 0,
+                'parameter_variations': [],
+                'output_directory': str(self.output_dir),
+                'preprocessed_directory': str(self.preprocessed_dir),
+                'segmentation_directory': str(self.segmentation_dir)
+            }
+        }
+
+        total_frames = image_stack.shape[0]
+        processed_masks = []
+
+        # Initialize tracker
+        tracker = CellTracker(AnalysisConfig())
+
+        # Process first frame normally
+        frame = image_stack[0]
+        preprocessed, preprocessing_steps = self.preprocess_frame(frame)
+        masks, flows, styles = self.model.eval(
+            preprocessed,
+            diameter=self.params.diameter,
+            batch_size=8,
+            channels=[0, 0],
+            flow_threshold=self.params.flow_threshold,
+            cellprob_threshold=self.params.cellprob_threshold,
+            normalize=True,
+            do_3D=False
+        )
+        exclude_mask = self._create_exclude_mask(preprocessed)
+        masks = self._apply_exclude_mask(masks, exclude_mask)
+        processed_masks.append(masks)
+        results['masks'].append(masks)
+        results['flows'].append(flows)
+        results['metadata']['processed_frames'] += 1
+
+        if save_intermediate:
+            self._save_frame(0, masks)
+            self._save_preprocessing_steps(0, *preprocessing_steps)
+            self._save_segmentation_frame(0, preprocessed, masks, flows, styles, np.array([self.params.diameter]))
+
+        # Process remaining frames
+        for frame_idx in range(1, total_frames):
+            logger.info(f"Processing frame {frame_idx + 1}/{total_frames}")
+
+            try:
+                # Get current frame
+                frame = image_stack[frame_idx]
+                preprocessed, preprocessing_steps = self.preprocess_frame(frame)
+
+                # Find best segmentation using parameter variations
+                masks, flows, styles = self._find_best_segmentation(
+                    frame,
+                    preprocessed,
+                    processed_masks[-1]
+                )
+
+                # Create sliding window for tracking
+                window_start = max(0, frame_idx - window_size + 1)
+                window_frames = processed_masks[window_start:] + [masks]
+                window_stack = np.stack(window_frames)
+
+                # Track cells in window
+                tracked_window = tracker.track_cells(window_stack)
+
+                # Check temporal consistency
+                consistent = self._check_temporal_consistency(tracked_window)
+
+                if not consistent:
+                    logger.warning(f"Temporal consistency check failed for frame {frame_idx}")
+                    # Try finding a better segmentation with stricter overlap requirements
+                    self.params.min_overlap_threshold *= 1.1  # Temporarily increase overlap threshold
+                    masks, flows, styles = self._find_best_segmentation(
+                        frame,
+                        preprocessed,
+                        processed_masks[-1]
+                    )
+                    self.params.min_overlap_threshold /= 1.1  # Reset overlap threshold
+
+                    # Recheck tracking and consistency
+                    window_frames = processed_masks[window_start:] + [masks]
+                    window_stack = np.stack(window_frames)
+                    tracked_window = tracker.track_cells(window_stack)
+
+                    if not self._check_temporal_consistency(tracked_window):
+                        logger.warning(f"Failed to achieve temporal consistency for frame {frame_idx}")
+
+                # Use the final frame from tracked window
+                masks = tracked_window[-1]
+
+                # Save and track results
+                processed_masks.append(masks)
+                results['masks'].append(masks)
+                results['flows'].append(flows)
+                results['metadata']['processed_frames'] += 1
+
+                if save_intermediate:
+                    self._save_frame(frame_idx, masks)
+                    self._save_preprocessing_steps(frame_idx, *preprocessing_steps)
+                    self._save_segmentation_frame(frame_idx, preprocessed, masks, flows, styles,
+                                                  np.array([self.params.diameter]))
+
+            except Exception as e:
+                logger.error(f"Error processing frame {frame_idx}: {str(e)}")
+                continue
+
+        # Convert masks list to stack and save final result
+        masks_stack = np.stack(results['masks'], axis=0)
+        output_file = Path(self.output_dir).parent / 'segmentation.tif'
+        tifffile.imwrite(output_file, masks_stack.astype(np.uint16))
+
+        logger.info(f"Processing complete. Final segmentation saved to: {output_file}")
+        return results
     def initialize_model(self, model_path: str) -> None:
         """Initialize CellposeModel with a specific model path"""
         logger.info(f"Loading model from: {model_path}")
@@ -131,7 +300,8 @@ class CellSegmentationPipeline:
 
     def _check_temporal_consistency(self, tracked_window: np.ndarray) -> bool:
         """
-        Check temporal consistency of tracked cells based on average overlap between frames.
+        Check temporal consistency of tracked cells based on overlap between frames
+        and cell count stability.
 
         Parameters:
         -----------
@@ -144,13 +314,16 @@ class CellSegmentationPipeline:
             True if tracking is temporally consistent, False otherwise
         """
 
-        def calculate_frame_overlaps(frame1: np.ndarray, frame2: np.ndarray) -> float:
-            """Calculate average overlap ratio between cells in consecutive frames."""
+        def calculate_frame_metrics(frame1: np.ndarray, frame2: np.ndarray) -> tuple[float, float]:
+            """Calculate overlap ratio and cell count change between consecutive frames."""
             overlap_ratios = []
 
             # Get unique cell IDs in both frames (excluding background 0)
             cells1 = set(np.unique(frame1)) - {0}
             cells2 = set(np.unique(frame2)) - {0}
+
+            # Calculate cell count change percentage
+            count_change = abs(len(cells2) - len(cells1)) / len(cells1) if len(cells1) > 0 else float('inf')
 
             # Calculate overlap for each cell that exists in both frames
             for cell_id in cells1 & cells2:
@@ -167,34 +340,105 @@ class CellSegmentationPipeline:
                     overlap_ratio = intersection / union
                     overlap_ratios.append(overlap_ratio)
 
-            # If no overlaps found, return 0
-            if not overlap_ratios:
-                return 0.0
+            # If no overlaps found, return 0 for overlap and the count change
+            avg_overlap = np.mean(overlap_ratios) if overlap_ratios else 0.0
+            return avg_overlap, count_change
 
-            # Return average overlap ratio
-            return np.mean(overlap_ratios)
+        # Calculate overlaps and cell count changes between consecutive frames
+        frame_metrics = []
+        max_allowed_count_change = 0  # Maximum allowed 15% change in cell count
 
-        # Calculate overlaps between consecutive frames
-        frame_overlaps = []
         for i in range(len(tracked_window) - 1):
-            overlap = calculate_frame_overlaps(
+            overlap, count_change = calculate_frame_metrics(
                 tracked_window[i],
                 tracked_window[i + 1]
             )
-            frame_overlaps.append(overlap)
+            frame_metrics.append((overlap, count_change))
 
-            # Early exit if any consecutive frames have very poor overlap
-            if overlap < self.params.min_overlap_threshold:
-                logger.debug(f"Low overlap {overlap:.3f} detected between frames {i} and {i + 1}")
+            # Early exit if any consecutive frames have very poor metrics
+            if (overlap < self.params.min_overlap_threshold or
+                    count_change > max_allowed_count_change):
+                logger.debug(f"Inconsistency detected between frames {i} and {i + 1}:")
+                logger.debug(f"Overlap: {overlap:.3f}, Count change: {count_change:.3f}")
                 return False
 
-        # Calculate average overlap across all frame pairs
-        avg_overlap = np.mean(frame_overlaps)
-        logger.debug(f"Average overlap across window: {avg_overlap:.3f}")
+        # Calculate average metrics across all frame pairs
+        avg_overlap = np.mean([m[0] for m in frame_metrics])
+        avg_count_change = np.mean([m[1] for m in frame_metrics])
 
-        # Return True if average overlap is above threshold
-        return avg_overlap >= self.params.min_overlap_threshold
+        logger.debug(f"Average overlap: {avg_overlap:.3f}")
+        logger.debug(f"Average count change: {avg_count_change:.3f}")
 
+        # Return True if both metrics are within acceptable ranges
+        return (avg_overlap >= self.params.min_overlap_threshold and
+                avg_count_change <= max_allowed_count_change)
+
+    def _find_best_segmentation(self, frame: np.ndarray, preprocessed: np.ndarray,
+                                prev_masks: np.ndarray) -> Tuple[np.ndarray, np.ndarray, List[np.ndarray]]:
+        """Try different parameter sets and find the best segmentation based on temporal consistency"""
+        parameter_sets = self._get_parameter_variations(self.params)
+        best_score = -1
+        best_result = None
+
+        def calculate_frame_score(frame1: np.ndarray, frame2: np.ndarray) -> tuple[float, float]:
+            """Calculate combined score based on overlap and cell count consistency."""
+            cells1 = set(np.unique(frame1)) - {0}
+            cells2 = set(np.unique(frame2)) - {0}
+
+            # Calculate cell count change score (1.0 is perfect, 0.0 is bad)
+            count_change = abs(len(cells2) - len(cells1)) / len(cells1) if len(cells1) > 0 else float('inf')
+            count_score = max(0, 1 - (count_change / 0.15))  # 0.15 is max allowed change
+
+            # Calculate overlap score
+            overlap_ratios = []
+            for cell_id in cells1 & cells2:
+                mask1 = frame1 == cell_id
+                mask2 = frame2 == cell_id
+                intersection = np.sum(mask1 & mask2)
+                union = np.sum(mask1 | mask2)
+
+                if union > 0:
+                    overlap_ratio = intersection / union
+                    overlap_ratios.append(overlap_ratio)
+
+            overlap_score = np.mean(overlap_ratios) if overlap_ratios else 0.0
+
+            # Combined score: 60% overlap, 40% cell count consistency
+            combined_score = (0.6 * overlap_score + 0.4 * count_score)
+            return combined_score, count_change
+
+        for params in parameter_sets:
+            # Try segmentation with current parameter set
+            masks, flows, styles = self.model.eval(
+                preprocessed,
+                diameter=params.diameter,
+                batch_size=8,
+                channels=[0, 0],
+                flow_threshold=params.flow_threshold,
+                cellprob_threshold=params.cellprob_threshold,
+                normalize=True,
+                do_3D=False
+            )
+
+            # Apply exclude mask
+            exclude_mask = self._create_exclude_mask(preprocessed)
+            current_masks = self._apply_exclude_mask(masks, exclude_mask)
+
+            # Calculate combined score with previous frame
+            score, count_change = calculate_frame_score(prev_masks, current_masks)
+
+            logger.debug(f"Parameter set (d={params.diameter}, ft={params.flow_threshold}, "
+                         f"ct={params.cellprob_threshold}) achieved score: {score:.3f} "
+                         f"(count change: {count_change:.3f})")
+
+            if score > best_score:
+                best_score = score
+                best_result = (current_masks, flows, styles)
+
+        if best_result is None:
+            raise ValueError("Failed to find valid segmentation with any parameter set")
+
+        return best_result
     def _setup_directories(self):
         """Create necessary directories for output"""
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -437,138 +681,6 @@ class CellSegmentationPipeline:
         logger.info(f"Loaded stack with shape: {stack.shape}")
         return stack
 
-    def process_stack(self, image_stack: np.ndarray, save_intermediate: bool = True) -> Dict:
-        """Process an image stack with sliding window tracking for temporal consistency"""
-        self._setup_directories()
-        window_size = 3  # Sliding window of 3 frames
-        max_attempts = 3  # Maximum number of segmentation attempts per frame
-
-        results = {
-            'masks': [],
-            'flows': [],
-            'metadata': {
-                'parameters': self.params.__dict__,
-                'stack_shape': image_stack.shape,
-                'processed_frames': 0,
-                'failed_frames': [],
-                'resegmented_frames': [],
-                'output_directory': str(self.output_dir),
-                'preprocessed_directory': str(self.preprocessed_dir),
-                'segmentation_directory': str(self.segmentation_dir)
-            }
-        }
-
-        total_frames = image_stack.shape[0]
-        processed_masks = []
-
-        # Process first frame normally
-        frame = image_stack[0]
-        preprocessed, preprocessing_steps = self.preprocess_frame(frame)
-        masks, flows, styles = self.model.eval(
-            preprocessed,
-            diameter=self.params.diameter,
-            batch_size=8,
-            channels=[0, 0],
-            flow_threshold=self.params.initial_flow_threshold,
-            cellprob_threshold=self.params.initial_cellprob_threshold,
-            normalize=True,
-            do_3D=False
-        )
-        exclude_mask = self._create_exclude_mask(preprocessed)
-        masks = self._apply_exclude_mask(masks, exclude_mask)
-        processed_masks.append(masks)
-        results['masks'].append(masks)
-        results['flows'].append(flows)
-        results['metadata']['processed_frames'] += 1
-
-        if save_intermediate:
-            self._save_frame(0, masks)
-            self._save_preprocessing_steps(0, *preprocessing_steps)
-            self._save_segmentation_frame(0, preprocessed, masks, flows, styles, np.array([self.params.diameter]))
-
-        # Initialize tracker
-        tracker = CellTracker(AnalysisConfig())
-
-        # Process remaining frames with sliding window
-        for frame_idx in range(1, total_frames):
-            logger.info(f"Processing frame {frame_idx + 1}/{total_frames}")
-
-            try:
-                # Get current frame
-                frame = image_stack[frame_idx]
-                preprocessed, preprocessing_steps = self.preprocess_frame(frame)
-
-                # Initial segmentation
-                current_masks = None
-                attempt = 0
-                consistent = False
-
-                while not consistent and attempt < max_attempts:
-                    # Adjust segmentation parameters based on attempt number
-                    flow_threshold = self.params.initial_flow_threshold - (0.1 * attempt)
-                    cellprob_threshold = self.params.initial_cellprob_threshold - (0.1 * attempt)
-                    diameter = self.params.diameter + (10 * attempt)
-                    # Segment current frame
-                    masks, flows, styles = self.model.eval(
-                        preprocessed,
-                        diameter=diameter,
-                        batch_size=8,
-                        channels=[0, 0],
-                        flow_threshold=flow_threshold,
-                        cellprob_threshold=cellprob_threshold,
-                        normalize=True,
-                        do_3D=False
-                    )
-
-                    # Apply exclude mask
-                    exclude_mask = self._create_exclude_mask(preprocessed)
-                    current_masks = self._apply_exclude_mask(masks, exclude_mask)
-
-                    # Create sliding window for tracking
-                    window_start = max(0, frame_idx - window_size + 1)
-                    window_frames = processed_masks[window_start:] + [current_masks]
-                    window_stack = np.stack(window_frames)
-
-                    # Track cells in window
-                    tracked_window = tracker.track_cells(window_stack)
-
-                    # Check temporal consistency
-                    consistent = self._check_temporal_consistency(tracked_window)
-
-                    if not consistent:
-                        attempt += 1
-                        logger.info(f"Inconsistent tracking detected, attempt {attempt}")
-                        if attempt == max_attempts:
-                            logger.warning(f"Max attempts reached for frame {frame_idx}")
-                            results['metadata']['failed_frames'].append(frame_idx)
-                        else:
-                            results['metadata']['resegmented_frames'].append(frame_idx)
-
-                # Save final result for this frame - use the last frame from tracked window
-                current_masks = tracked_window[-1]
-                processed_masks.append(current_masks)
-                results['masks'].append(current_masks)
-                results['flows'].append(flows)
-                results['metadata']['processed_frames'] += 1
-
-                if save_intermediate:
-                    self._save_frame(frame_idx, current_masks)
-                    self._save_preprocessing_steps(frame_idx, *preprocessing_steps)
-                    self._save_segmentation_frame(frame_idx, preprocessed, current_masks, flows, styles, np.array([self.params.diameter]))
-
-            except Exception as e:
-                logger.error(f"Error processing frame {frame_idx}: {str(e)}")
-                results['metadata']['failed_frames'].append(frame_idx)
-                continue
-
-        # Convert masks list to stack and save final result
-        masks_stack = np.stack(results['masks'], axis=0)
-        output_file = Path(self.output_dir).parent / 'segmentation.tif'
-        tifffile.imwrite(output_file, masks_stack.astype(np.uint16))
-
-        logger.info(f"Processing complete. Final segmentation saved to: {output_file}")
-        return results
-
     def conservative_segmentation(self, image: np.ndarray) -> Tuple[np.ndarray, List[np.ndarray]]:
         """First pass: Conservative cell segmentation"""
         if self.model is None:
@@ -662,8 +774,8 @@ def main(path, filename, model_path):
     results = pipeline.process_stack(image_stack)
 
 if __name__ == "__main__":
-    path = "D:/2024-11-27/position5/"
+    path = "D:/2024-11-27/position13/"
     filename = "registered_membrane_slice_downsized.tif"
-    model_path = "D:/cellpose_models/cyto3_xenopus1"
+    model_path = "D:/cellpose_models/cyto3_xenopus2"
 
     main(path, filename, model_path)

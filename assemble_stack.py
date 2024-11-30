@@ -66,7 +66,7 @@ def process_segmentation_frames(input_dir: str, output_path: str) -> None:
 
 if __name__ == "__main__":
     # Example usage
-    base_dir = "D:/2024-11-27/position4/"
+    base_dir = "D:/2024-11-27/position12/"
 
     input_directory = os.path.join(base_dir, "./segmentation_frames")
     output_file = os.path.join(base_dir, "segmentation.tif")
