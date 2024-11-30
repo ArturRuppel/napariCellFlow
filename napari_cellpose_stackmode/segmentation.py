@@ -51,44 +51,38 @@ class SegmentationHandler(QObject):
     segmentation_failed = Signal(str)  # error message
 
     def __init__(self):
-        """Initialize the segmentation handler"""
         super().__init__()
         self.params = SegmentationParameters()
-        self.model: Optional[models.CellposeModel] = None
-        self.last_results: Dict[str, Any] = {}
+        self.model = None
+        self.last_results = {}
 
-    def initialize_model(self, params: SegmentationParameters) -> None:
-        """Initialize or update the Cellpose model"""
+    def initialize_model(self, params: SegmentationParameters):
+        """Initialize the Cellpose model with given parameters"""
         try:
-            self.params = params
-            self.params.validate()
+            logger.info("Initializing Cellpose model")
+            if params.model_type == "custom" and not params.custom_model_path:
+                raise ValueError("Custom model path required for custom model type")
 
-            if params.model_type == "custom" and params.custom_model_path:
-                logger.info(f"Loading custom model from: {params.custom_model_path}")
-                self.model = models.CellposeModel(
-                    gpu=params.gpu,
-                    pretrained_model=params.custom_model_path
-                )
+            if params.model_type == "custom":
+                self.model = models.CellposeModel(pretrained_model=params.custom_model_path, gpu=params.gpu)
             else:
-                logger.info(f"Loading built-in {params.model_type} model")
-                self.model = models.CellposeModel(
-                    gpu=params.gpu,
-                    model_type=params.model_type
-                )
+                self.model = models.CellposeModel(model_type=params.model_type, gpu=params.gpu)
 
+            self.params = params
             logger.info("Model initialized successfully")
 
         except Exception as e:
-            logger.error(f"Error initializing model: {str(e)}")
-            self.segmentation_failed.emit(str(e))
+            logger.error(f"Failed to initialize model: {str(e)}")
             raise
-
-    def segment_frame(self, image: np.ndarray) -> None:
+    def segment_frame(self, image: np.ndarray) -> Tuple[np.ndarray, dict]:
         """
-        Segment a single frame using Cellpose
+        Segment a single frame using Cellpose. Returns the masks and results dictionary.
 
         Args:
             image: 2D numpy array of the image to segment
+
+        Returns:
+            Tuple of (masks array, results dictionary)
         """
         if self.model is None:
             error_msg = "Model not initialized. Call initialize_model first."
@@ -109,21 +103,24 @@ class SegmentationHandler(QObject):
             )
 
             # Store results
-            self.last_results = {
+            results = {
+                'masks': masks,
                 'flows': flows,
                 'styles': styles,
                 'diameter': self.params.diameter,
                 'parameters': self.params.__dict__
             }
+            self.last_results = results
 
             # Emit completion signal
-            self.segmentation_completed.emit(masks, self.last_results)
+            self.segmentation_completed.emit(masks, results)
+
+            return masks, results
 
         except Exception as e:
             logger.error(f"Error during segmentation: {str(e)}")
             self.segmentation_failed.emit(str(e))
             raise
-
     def save_results(self, output_dir: Path) -> None:
         """
         Save the last segmentation results in Cellpose-compatible format

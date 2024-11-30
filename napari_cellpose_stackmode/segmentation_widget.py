@@ -43,6 +43,39 @@ class SegmentationWidget(QWidget):
         self._setup_ui()
         self._connect_signals()
 
+    def _ensure_model_initialized(self) -> bool:
+        """Make sure model is initialized before running segmentation"""
+        if self.segmentation.model is None:
+            try:
+                self._initialize_model()
+                return True
+            except Exception as e:
+                self._on_segmentation_failed(f"Model initialization failed: {str(e)}")
+                return False
+        return True
+
+    def _run_segmentation(self):
+        """Run segmentation on current frame"""
+        try:
+            if not self._ensure_model_initialized():
+                return
+
+            image_layer = self._get_active_image_layer()
+            if image_layer is None:
+                raise ValueError("No image layer selected")
+
+            # Get current frame data
+            data = image_layer.data
+            if data.ndim > 2:
+                current_step = self.viewer.dims.point[0]
+                data = data[int(current_step)]
+
+            # Run segmentation
+            self.segmentation.segment_frame(data)
+
+        except Exception as e:
+            self._on_segmentation_failed(str(e))
+
     def _setup_ui(self):
         """Create and arrange the widget UI"""
         layout = QVBoxLayout()
@@ -164,7 +197,11 @@ class SegmentationWidget(QWidget):
         self.custom_model_btn.setEnabled(model_type == "custom")
         if model_type != "custom":
             self._custom_model_path = None
-
+            # Initialize model when changing to built-in models
+            try:
+                self._initialize_model()
+            except Exception as e:
+                logger.error(f"Failed to initialize model on type change: {str(e)}")
     def _load_custom_model(self):
         """Open file dialog to select custom model"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -213,35 +250,16 @@ class SegmentationWidget(QWidget):
         """Initialize the segmentation model with current parameters"""
         try:
             params = self._get_current_parameters()
+            params.validate()  # Make sure parameters are valid
             self.segmentation.initialize_model(params)
+            logger.info("Model initialized successfully")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to initialize model: {str(e)}")
-
-    def _run_segmentation(self):
-        """Run segmentation on current frame"""
-        try:
-            image_layer = self._get_active_image_layer()
-            if image_layer is None:
-                raise ValueError("No image layer selected")
-
-            # Get current frame data
-            data = image_layer.data
-            if data.ndim > 2:
-                current_step = self.viewer.dims.point[0]
-                data = data[int(current_step)]
-
-            # Initialize model if needed
-            if self.segmentation.model is None:
-                self._initialize_model()
-
-            # Run segmentation
-            self.segmentation.segment_frame(data)
-
-        except Exception as e:
-            self._on_segmentation_failed(str(e))
+            error_msg = f"Failed to initialize model: {str(e)}"
+            logger.error(error_msg)
+            QMessageBox.critical(self, "Error", error_msg)
 
     def _run_stack_segmentation(self):
-        """Run segmentation on entire stack"""
+        """Run segmentation on entire stack with progress tracking"""
         try:
             image_layer = self._get_active_image_layer()
             if image_layer is None:
@@ -258,17 +276,62 @@ class SegmentationWidget(QWidget):
             masks_list = []
             total_frames = image_layer.data.shape[0]
 
-            for i in range(total_frames):
-                self.segmentation.segment_frame(image_layer.data[i])
-                masks_list.append(self.segmentation.last_results['masks'])
+            # Create progress dialog
+            from qtpy.QtWidgets import QProgressDialog
+            from qtpy.QtCore import Qt
+            progress = QProgressDialog("Processing image stack...", "Cancel", 0, total_frames, self)
+            progress.setWindowModality(Qt.WindowModal)
 
-            # Combine results
-            masks_stack = np.stack(masks_list)
-            self._on_segmentation_completed(masks_stack, self.segmentation.last_results)
+            try:
+                for i in range(total_frames):
+                    if progress.wasCanceled():
+                        raise InterruptedError("Processing canceled by user")
+
+                    # Update progress
+                    progress.setValue(i)
+                    progress.setLabelText(f"Processing frame {i + 1}/{total_frames}")
+
+                    # Extract single frame and ensure proper dimensions
+                    frame = image_layer.data[i]
+                    if frame.ndim > 2:
+                        frame = frame.squeeze()
+                    if frame.ndim != 2:
+                        raise ValueError(f"Invalid frame dimensions: {frame.shape}")
+
+                    # Run segmentation on frame
+                    try:
+                        masks, results = self.segmentation.segment_frame(frame)
+                        masks_list.append(masks)
+                        logger.debug(f"Processed frame {i + 1}/{total_frames}, found {len(np.unique(masks)) - 1} cells")
+                    except Exception as e:
+                        raise ValueError(f"Failed to segment frame {i}: {str(e)}")
+
+                # Stack all masks together
+                masks_stack = np.stack(masks_list)
+
+                # Store final results with all frames
+                final_results = {
+                    'masks': masks_stack,
+                    'parameters': self.segmentation.params.__dict__,
+                    'total_frames': total_frames
+                }
+
+                # Update visualization and emit completion signal
+                self._on_segmentation_completed(masks_stack, final_results)
+
+            finally:
+                # Ensure progress dialog is closed
+                progress.close()
+
+        except InterruptedError as e:
+            logger.info(f"Stack processing interrupted: {str(e)}")
+            QMessageBox.information(self, "Processing Canceled", "Stack processing was canceled")
 
         except Exception as e:
-            self._on_segmentation_failed(str(e))
-
+            error_msg = f"Stack processing failed: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            QMessageBox.critical(self, "Error", error_msg)
+            self._on_segmentation_failed(error_msg)
     def _save_results(self):
         """Save segmentation results"""
         try:
