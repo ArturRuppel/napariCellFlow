@@ -10,7 +10,7 @@ import numpy as np
 from napari.layers import Image
 from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox, QFormLayout, QProgressBar,
     QPushButton, QFileDialog, QMessageBox, QProgressDialog,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox
 )
@@ -47,16 +47,71 @@ class SegmentationWidget(QWidget):
         self._setup_ui()
         self._connect_signals()
 
-    def _ensure_model_initialized(self) -> bool:
-        """Make sure model is initialized before running segmentation"""
-        if self.segmentation.model is None:
-            try:
-                self._initialize_model()
-                return True
-            except Exception as e:
-                self._on_segmentation_failed(f"Model initialization failed: {str(e)}")
-                return False
-        return True
+    def _connect_signals(self):
+        """Connect signals between components"""
+        # Connect segmentation handler signals
+        self.segmentation.signals.segmentation_completed.connect(self._on_segmentation_completed)
+        self.segmentation.signals.segmentation_failed.connect(self._on_segmentation_failed)
+        self.segmentation.signals.progress_updated.connect(self._update_progress)
+
+        # Connect export/import buttons
+        self.export_btn.clicked.connect(self.export_to_cellpose)
+        self.launch_gui_btn.clicked.connect(self.launch_cellpose_gui)
+        self.import_btn.clicked.connect(self.import_corrections)
+
+        # Model selection signals
+        self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        self.custom_model_btn.clicked.connect(self._load_custom_model)
+
+        # Action button signals
+        self.run_btn.clicked.connect(self._run_segmentation)
+        self.run_stack_btn.clicked.connect(self._run_stack_segmentation)
+        self.save_btn.clicked.connect(self._save_results)
+
+        # Viewer layer events
+        self.viewer.layers.events.inserted.connect(self._update_button_states)
+        self.viewer.layers.events.removed.connect(self._update_button_states)
+
+    def _update_button_states(self, event=None):
+        """Update button states based on current conditions"""
+        has_image = self._get_active_image_layer() is not None
+        has_segmentation = (hasattr(self.data_manager, 'segmentation_data') and
+                            self.data_manager.segmentation_data is not None)
+
+        # Update main operation buttons
+        self.run_btn.setEnabled(has_image)
+        self.run_stack_btn.setEnabled(
+            has_image and
+            isinstance(self._get_active_image_layer().data, np.ndarray) and
+            self._get_active_image_layer().data.ndim > 2
+        )
+
+        # Update export-related buttons
+        self.export_btn.setEnabled(has_segmentation)
+        self.launch_gui_btn.setEnabled(True)  # Always enabled as it's independent
+        self.import_btn.setEnabled(has_segmentation)
+        self.save_btn.setEnabled(has_segmentation)
+
+    def shutdown(self):
+        """Clean up resources"""
+        try:
+            # Disconnect layer events
+            self.viewer.layers.events.inserted.disconnect(self._update_button_states)
+            self.viewer.layers.events.removed.disconnect(self._update_button_states)
+
+            # Clear references
+            self.viewer = None
+            self.data_manager = None
+            self.vis_manager = None
+            self.segmentation = None
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+
+    def _update_progress(self, progress: int, message: str):
+        """Update progress bar and status message"""
+        self.progress_bar.setValue(progress)
+        self.status_label.setText(message)
+        logger.debug(f"Progress: {progress}%, Message: {message}")
 
     def _run_segmentation(self):
         """Run segmentation on current frame"""
@@ -67,6 +122,11 @@ class SegmentationWidget(QWidget):
             image_layer = self._get_active_image_layer()
             if image_layer is None:
                 raise ValueError("No image layer selected")
+
+            # Disable controls during processing
+            self._set_controls_enabled(False)
+            self.progress_bar.setValue(0)
+            self.status_label.setText("Starting segmentation...")
 
             # Get current frame data
             data = image_layer.data
@@ -79,20 +139,88 @@ class SegmentationWidget(QWidget):
 
         except Exception as e:
             self._on_segmentation_failed(str(e))
+        finally:
+            self._set_controls_enabled(True)
+
+    def _set_controls_enabled(self, enabled: bool):
+        """Enable or disable all controls"""
+        controls = [
+            self.run_btn,
+            self.run_stack_btn,
+            self.model_combo,
+            self.custom_model_btn,
+            self.diameter_spin,
+            self.flow_spin,
+            self.prob_spin,
+            self.size_spin,
+            self.gpu_check,
+            self.normalize_check
+        ]
+        for control in controls:
+            control.setEnabled(enabled)
+
+    def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
+        """Handle successful segmentation"""
+        try:
+            # Update data manager
+            self.data_manager.segmentation_data = masks
+
+            # Update visualization
+            self.vis_manager.update_tracking_visualization(masks)
+
+            # Enable buttons
+            self.save_btn.setEnabled(True)
+            self.export_btn.setEnabled(True)
+
+            # Update status
+            num_cells = len(np.unique(masks)) - 1
+            self.status_label.setText(f"Segmentation complete. Found {num_cells} cells")
+            self.progress_bar.setValue(100)
+
+            # Signal completion
+            self.segmentation_completed.emit(masks, results)
+
+        except Exception as e:
+            self._on_segmentation_failed(str(e))
+
+    def _on_segmentation_failed(self, error_msg: str):
+        """Handle segmentation failure"""
+        logger.error(f"Segmentation failed: {error_msg}")
+        self.progress_bar.setValue(0)
+        self.status_label.setText(f"Error: {error_msg}")
+        QMessageBox.critical(self, "Error", f"Segmentation failed: {error_msg}")
+        self.segmentation_failed.emit(error_msg)
+        self._set_controls_enabled(True)
+
+    def _ensure_model_initialized(self) -> bool:
+        """Make sure model is initialized before running segmentation"""
+        if self.segmentation.model is None:
+            try:
+                self._initialize_model()
+                return True
+            except Exception as e:
+                self._on_segmentation_failed(f"Model initialization failed: {str(e)}")
+                return False
+        return True
 
     def _setup_ui(self):
         """Create and arrange the widget UI"""
         layout = QVBoxLayout()
         self.setLayout(layout)
 
+        # Title
+        title = QLabel("Cell Segmentation")
+        title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        layout.addWidget(title)
+
         # Model Selection Section
-        model_group = QWidget()
+        model_group = QGroupBox("Model Selection")
         model_layout = QHBoxLayout()
         model_group.setLayout(model_layout)
 
         model_layout.addWidget(QLabel("Model:"))
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["cyto", "nuclei", "custom"])
+        self.model_combo.addItems(["cyto3", "nuclei", "custom"])
         model_layout.addWidget(self.model_combo)
 
         self.custom_model_btn = QPushButton("Load Custom...")
@@ -102,71 +230,77 @@ class SegmentationWidget(QWidget):
         layout.addWidget(model_group)
 
         # Parameters Section
-        params_group = QWidget()
-        params_layout = QVBoxLayout()
+        params_group = QGroupBox("Parameters")
+        params_layout = QFormLayout()
         params_group.setLayout(params_layout)
 
         # Cell diameter
-        diameter_layout = QHBoxLayout()
-        diameter_layout.addWidget(QLabel("Cell Diameter:"))
         self.diameter_spin = QDoubleSpinBox()
         self.diameter_spin.setRange(0.1, 1000.0)
         self.diameter_spin.setValue(95.0)
-        diameter_layout.addWidget(self.diameter_spin)
-        params_layout.addLayout(diameter_layout)
+        params_layout.addRow("Cell Diameter:", self.diameter_spin)
 
         # Flow threshold
-        flow_layout = QHBoxLayout()
-        flow_layout.addWidget(QLabel("Flow Threshold:"))
         self.flow_spin = QDoubleSpinBox()
         self.flow_spin.setRange(0.0, 1.0)
         self.flow_spin.setValue(0.6)
         self.flow_spin.setSingleStep(0.1)
-        flow_layout.addWidget(self.flow_spin)
-        params_layout.addLayout(flow_layout)
+        params_layout.addRow("Flow Threshold:", self.flow_spin)
 
         # Cell probability threshold
-        prob_layout = QHBoxLayout()
-        prob_layout.addWidget(QLabel("Cell Probability:"))
         self.prob_spin = QDoubleSpinBox()
         self.prob_spin.setRange(0.0, 1.0)
         self.prob_spin.setValue(0.3)
         self.prob_spin.setSingleStep(0.1)
-        prob_layout.addWidget(self.prob_spin)
-        params_layout.addLayout(prob_layout)
+        params_layout.addRow("Cell Probability:", self.prob_spin)
 
         # Minimum size
-        size_layout = QHBoxLayout()
-        size_layout.addWidget(QLabel("Min Size:"))
         self.size_spin = QSpinBox()
         self.size_spin.setRange(1, 10000)
         self.size_spin.setValue(25)
-        size_layout.addWidget(self.size_spin)
-        params_layout.addLayout(size_layout)
+        params_layout.addRow("Min Size:", self.size_spin)
 
         # Additional options
         options_layout = QHBoxLayout()
         self.gpu_check = QCheckBox("Use GPU")
         self.normalize_check = QCheckBox("Normalize")
+        self.compute_diameter_check = QCheckBox("Auto-compute diameter")
         self.normalize_check.setChecked(True)
-        options_layout.addWidget(self.gpu_check)
-        options_layout.addWidget(self.normalize_check)
-        params_layout.addLayout(options_layout)
+        self.compute_diameter_check.setChecked(True)
+
+        options_group = QGroupBox("Advanced Options")
+        options_group_layout = QVBoxLayout()
+        options_group_layout.addWidget(self.gpu_check)
+        options_group_layout.addWidget(self.normalize_check)
+        options_group_layout.addWidget(self.compute_diameter_check)
+        options_group.setLayout(options_group_layout)
 
         layout.addWidget(params_group)
+        layout.addWidget(options_group)
 
         # Action Buttons
-        button_group = QWidget()
-        button_layout = QHBoxLayout()
+        button_group = QGroupBox("Actions")
+        button_layout = QVBoxLayout()
         button_group.setLayout(button_layout)
 
+        # Progress bar and status
+        self.progress_bar = QProgressBar()
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+
+        # Buttons
+        buttons_layout = QHBoxLayout()
         self.run_btn = QPushButton("Run Segmentation")
         self.run_stack_btn = QPushButton("Process Stack")
         self.save_btn = QPushButton("Save Results")
 
-        button_layout.addWidget(self.run_btn)
-        button_layout.addWidget(self.run_stack_btn)
-        button_layout.addWidget(self.save_btn)
+        buttons_layout.addWidget(self.run_btn)
+        buttons_layout.addWidget(self.run_stack_btn)
+        buttons_layout.addWidget(self.save_btn)
+
+        button_layout.addLayout(buttons_layout)
+        button_layout.addWidget(self.progress_bar)
+        button_layout.addWidget(self.status_label)
 
         layout.addWidget(button_group)
 
@@ -183,49 +317,27 @@ class SegmentationWidget(QWidget):
         correction_layout.addWidget(info_label)
 
         # Correction workflow buttons
+        correction_buttons_layout = QHBoxLayout()
         self.export_btn = QPushButton("Export to Cellpose")
-        self.export_btn.clicked.connect(self.export_to_cellpose)
-        self.export_btn.setEnabled(False)  # Enable only after segmentation
-
         self.launch_gui_btn = QPushButton("Launch Cellpose GUI")
-        self.launch_gui_btn.clicked.connect(self.launch_cellpose_gui)
-
         self.import_btn = QPushButton("Import Corrections")
-        self.import_btn.clicked.connect(self.import_corrections)
-        self.import_btn.setEnabled(False)  # Enable after export
 
-        correction_layout.addWidget(self.export_btn)
-        correction_layout.addWidget(self.launch_gui_btn)
-        correction_layout.addWidget(self.import_btn)
+        correction_buttons_layout.addWidget(self.export_btn)
+        correction_buttons_layout.addWidget(self.launch_gui_btn)
+        correction_buttons_layout.addWidget(self.import_btn)
+
+        correction_layout.addLayout(correction_buttons_layout)
 
         layout.addWidget(correction_group)
 
         # Initially disable buttons
         self.save_btn.setEnabled(False)
+        self.export_btn.setEnabled(False)
+        self.import_btn.setEnabled(False)
         self._update_button_states()
 
         # Add stretch at the bottom
         layout.addStretch()
-
-    def _connect_signals(self):
-        """Connect widget signals and slots"""
-        # Model selection signals
-        self.model_combo.currentTextChanged.connect(self._on_model_changed)
-        self.custom_model_btn.clicked.connect(self._load_custom_model)
-
-        # Action button signals
-        self.run_btn.clicked.connect(self._run_segmentation)
-        self.run_stack_btn.clicked.connect(self._run_stack_segmentation)
-        self.save_btn.clicked.connect(self._save_results)
-
-        # Segmentation handler signals
-        self.segmentation.segmentation_completed.connect(self._on_segmentation_completed)
-        self.segmentation.segmentation_failed.connect(self._on_segmentation_failed)
-
-        # Viewer layer events
-        self.viewer.layers.events.inserted.connect(self._update_button_states)
-        self.viewer.layers.events.removed.connect(self._update_button_states)
-
     def _on_model_changed(self, model_type: str):
         """Handle model type change"""
         self.custom_model_btn.setEnabled(model_type == "custom")
@@ -399,36 +511,6 @@ class SegmentationWidget(QWidget):
 
         return None
 
-    def _update_button_states(self, event=None):
-        """Update button states based on current conditions"""
-        has_image = self._get_active_image_layer() is not None
-        self.run_btn.setEnabled(has_image)
-        self.run_stack_btn.setEnabled(
-            has_image and
-            isinstance(self._get_active_image_layer().data, np.ndarray) and
-            self._get_active_image_layer().data.ndim > 2
-        )
-
-    def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
-        """Handle successful segmentation"""
-        # Update data manager
-        self.data_manager.segmentation_data = masks
-
-        # Update visualization
-        self.vis_manager.update_tracking_visualization(masks)
-
-        # Enable buttons
-        self.save_btn.setEnabled(True)
-        self.export_btn.setEnabled(True)  # Enable export for corrections
-
-        # Emit completion signal
-        self.segmentation_completed.emit(masks, results)
-    def _on_segmentation_failed(self, error_msg: str):
-        """Handle segmentation failure"""
-        logger.error(f"Segmentation failed: {error_msg}")
-        QMessageBox.critical(self, "Error", f"Segmentation failed: {error_msg}")
-        self.segmentation_failed.emit(error_msg)
-
     def export_to_cellpose(self):
         """Export current segmentation for Cellpose GUI editing"""
         try:
@@ -587,18 +669,6 @@ class SegmentationWidget(QWidget):
         scaled = ((scaled - img_min) / (img_max - img_min) * 255).astype(np.uint8)
 
         return scaled
-
-    def shutdown(self):
-        """Clean up resources"""
-        # Disconnect layer events
-        self.viewer.layers.events.inserted.disconnect(self._update_button_states)
-        self.viewer.layers.events.removed.disconnect(self._update_button_states)
-
-        # Clear references
-        self.viewer = None
-        self.data_manager = None
-        self.vis_manager = None
-        self.segmentation = None
 
     def launch_cellpose_gui(self):
         """Launch the Cellpose GUI"""
