@@ -1,16 +1,20 @@
+import json
+from datetime import datetime
 from typing import Optional
 import logging
 from pathlib import Path
+from qtpy.QtCore import Qt
 
 import napari
 import numpy as np
 from napari.layers import Image
 from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QFileDialog, QMessageBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
+    QPushButton, QFileDialog, QMessageBox, QProgressDialog,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox
 )
+from tifffile import tifffile
 
 from .segmentation import SegmentationHandler, SegmentationParameters
 from .data_manager import DataManager
@@ -165,6 +169,36 @@ class SegmentationWidget(QWidget):
         button_layout.addWidget(self.save_btn)
 
         layout.addWidget(button_group)
+
+        # Add Correction Workflow section
+        correction_group = QGroupBox("Manual Correction Workflow")
+        correction_layout = QVBoxLayout()
+        correction_group.setLayout(correction_layout)
+
+        # Add informative label
+        info_label = QLabel(
+            "Export segmentation to edit in Cellpose GUI, then import corrections"
+        )
+        info_label.setWordWrap(True)
+        correction_layout.addWidget(info_label)
+
+        # Correction workflow buttons
+        self.export_btn = QPushButton("Export to Cellpose")
+        self.export_btn.clicked.connect(self.export_to_cellpose)
+        self.export_btn.setEnabled(False)  # Enable only after segmentation
+
+        self.launch_gui_btn = QPushButton("Launch Cellpose GUI")
+        self.launch_gui_btn.clicked.connect(self.launch_cellpose_gui)
+
+        self.import_btn = QPushButton("Import Corrections")
+        self.import_btn.clicked.connect(self.import_corrections)
+        self.import_btn.setEnabled(False)  # Enable after export
+
+        correction_layout.addWidget(self.export_btn)
+        correction_layout.addWidget(self.launch_gui_btn)
+        correction_layout.addWidget(self.import_btn)
+
+        layout.addWidget(correction_group)
 
         # Initially disable buttons
         self.save_btn.setEnabled(False)
@@ -383,17 +417,176 @@ class SegmentationWidget(QWidget):
         # Update visualization
         self.vis_manager.update_tracking_visualization(masks)
 
-        # Enable save button
+        # Enable buttons
         self.save_btn.setEnabled(True)
+        self.export_btn.setEnabled(True)  # Enable export for corrections
 
         # Emit completion signal
         self.segmentation_completed.emit(masks, results)
-
     def _on_segmentation_failed(self, error_msg: str):
         """Handle segmentation failure"""
         logger.error(f"Segmentation failed: {error_msg}")
         QMessageBox.critical(self, "Error", f"Segmentation failed: {error_msg}")
         self.segmentation_failed.emit(error_msg)
+
+    def export_to_cellpose(self):
+        """Export current segmentation for Cellpose GUI editing"""
+        try:
+            # Get save location
+            save_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Select Export Directory",
+                str(Path.home())
+            )
+
+            if not save_dir:
+                return
+
+            save_dir = Path(save_dir)
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            # Verify we have segmentation data
+            if self.data_manager.segmentation_data is None:
+                raise ValueError("No segmentation data available")
+
+            # Get original image data
+            image_layer = self._get_active_image_layer()
+            if image_layer is None:
+                raise ValueError("No image layer found")
+
+            image_data = image_layer.data
+
+            # Ensure dimensions match
+            if image_data.shape != self.data_manager.segmentation_data.shape:
+                raise ValueError(
+                    f"Image shape {image_data.shape} does not match "
+                    f"segmentation shape {self.data_manager.segmentation_data.shape}"
+                )
+
+            # Save metadata about the export
+            metadata = {
+                'timestamp': str(datetime.now()),
+                'original_image_shape': image_data.shape,
+                'segmentation_parameters': self.segmentation.params.__dict__,
+                'total_frames': len(image_data)
+            }
+
+            with open(save_dir / 'export_metadata.json', 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            # Progress dialog for long exports
+            progress = QProgressDialog(
+                "Exporting segmentation data...",
+                "Cancel",
+                0,
+                len(image_data),
+                self
+            )
+            progress.setWindowModality(Qt.WindowModal)
+
+            try:
+                for i in range(len(image_data)):
+                    if progress.wasCanceled():
+                        raise InterruptedError("Export cancelled by user")
+
+                    progress.setValue(i)
+                    progress.setLabelText(f"Exporting frame {i + 1}/{len(image_data)}")
+
+                    # Get current frame data
+                    current_image = image_data[i]
+                    current_masks = self.data_manager.segmentation_data[i]
+
+                    # Ensure proper dimensions and type
+                    if current_image.ndim > 2:
+                        current_image = current_image.squeeze()
+                    if current_masks.ndim > 2:
+                        current_masks = current_masks.squeeze()
+
+                    # Convert to uint8 for image and uint16 for masks
+                    if current_image.dtype != np.uint8:
+                        current_image = self._scale_to_8bit(current_image)
+                    current_masks = current_masks.astype(np.uint16)
+
+                    # Generate outlines using Cellpose utility
+                    from cellpose.utils import masks_to_outlines
+                    outlines = masks_to_outlines(current_masks)
+
+                    # Create random colors for cell labels (Cellpose GUI expectation)
+                    ncells = len(np.unique(current_masks)[1:])  # exclude 0 background
+                    colors = ((np.random.rand(ncells, 3) * 0.8 + 0.1) * 255).astype(np.uint8)
+
+                    # Save frame image
+                    tifffile.imwrite(
+                        save_dir / f'img_{i:03d}.tif',
+                        current_image
+                    )
+
+                    # Prepare Cellpose-format data dictionary
+                    cellpose_data = {
+                        'img': current_image,
+                        'masks': current_masks,
+                        'outlines': outlines,
+                        'colors': colors,
+                        'filename': f'img_{i:03d}.tif',
+                        'flows': self.segmentation.last_results.get('flows', [None, None]),
+                        'chan_choose': [0, 0],  # Default to first channel
+                        'ismanual': np.zeros(ncells, dtype=bool),  # Track manual edits
+                        'filename': str(save_dir / f'img_{i:03d}.tif'),
+                        'diameter': float(self.segmentation.params.diameter)
+                    }
+
+                    # Save Cellpose data
+                    np.save(
+                        save_dir / f'img_{i:03d}_seg.npy',
+                        cellpose_data
+                    )
+
+                # Final progress update
+                progress.setValue(len(image_data))
+
+                # Enable import button and update status
+                self.import_btn.setEnabled(True)
+                QMessageBox.information(
+                    self,
+                    "Export Complete",
+                    f"Segmentation exported to {save_dir}\n"
+                    f"Total frames exported: {len(image_data)}\n\n"
+                    "You can now open and edit these files in the Cellpose GUI"
+                )
+
+                # Store export directory for later import
+                self._last_export_dir = save_dir
+
+            except InterruptedError:
+                QMessageBox.information(
+                    self,
+                    "Export Cancelled",
+                    "Export operation was cancelled"
+                )
+                return
+
+        except Exception as e:
+            error_msg = f"Failed to export segmentation: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Export Failed",
+                error_msg
+            )
+
+        finally:
+            if 'progress' in locals():
+                progress.close()
+
+    def _scale_to_8bit(self, image: np.ndarray) -> np.ndarray:
+        """Scale image data to 8-bit range"""
+        img_min = np.percentile(image, 1)  # 1st percentile for robustness
+        img_max = np.percentile(image, 99)  # 99th percentile for robustness
+
+        scaled = np.clip(image, img_min, img_max)
+        scaled = ((scaled - img_min) / (img_max - img_min) * 255).astype(np.uint8)
+
+        return scaled
 
     def shutdown(self):
         """Clean up resources"""
@@ -406,3 +599,69 @@ class SegmentationWidget(QWidget):
         self.data_manager = None
         self.vis_manager = None
         self.segmentation = None
+
+    def launch_cellpose_gui(self):
+        """Launch the Cellpose GUI"""
+        try:
+            import subprocess
+            import sys
+
+            # Launch Cellpose GUI in a separate process
+            subprocess.Popen([
+                sys.executable,
+                "-m",
+                "cellpose",
+                "--gui"
+            ])
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Launch Failed",
+                f"Failed to launch Cellpose GUI: {str(e)}"
+            )
+
+    def import_corrections(self):
+        """Import corrected masks from Cellpose"""
+        try:
+            # Get directory containing corrected files
+            import_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Select Directory with Corrected Files",
+                str(Path.home())
+            )
+
+            if not import_dir:
+                return
+
+            import_dir = Path(import_dir)
+
+            # Load corrected masks
+            corrected_masks = []
+            for i in range(len(self.data_manager.segmentation_data)):
+                mask_file = import_dir / f'img_{i:03d}_seg.npy'
+                if not mask_file.exists():
+                    raise FileNotFoundError(f"Missing mask file: {mask_file}")
+
+                data = np.load(mask_file, allow_pickle=True).item()
+                corrected_masks.append(data['masks'])
+
+            # Update segmentation data
+            corrected_stack = np.stack(corrected_masks)
+            self.data_manager.segmentation_data = corrected_stack
+
+            # Update visualization
+            self.vis_manager.update_tracking_visualization(corrected_stack)
+
+            QMessageBox.information(
+                self,
+                "Import Complete",
+                "Successfully imported corrected segmentation"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Import Failed",
+                f"Failed to import corrections: {str(e)}"
+            )

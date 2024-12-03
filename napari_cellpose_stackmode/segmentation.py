@@ -23,7 +23,7 @@ class SegmentationParameters:
     flow_threshold: float = 0.6
     cellprob_threshold: float = 0.3
     min_size: int = 25
-    gpu: bool = False
+    gpu: bool = True
 
     # Additional parameters
     batch_size: int = 8

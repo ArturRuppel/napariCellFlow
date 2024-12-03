@@ -29,7 +29,7 @@ def process_segmentation_frames(input_dir: str, output_path: str) -> None:
         raise ValueError(f"No segmentation .npy files found in {input_dir}")
 
     # Sort files numerically by frame number
-    npy_files.sort(key=lambda x: int(re.search(r'image_(\d+)_seg\.npy', x.name).group(1)))
+    npy_files.sort(key=lambda x: int(re.search(r'img_(\d+)_seg\.npy', x.name).group(1)))
 
     logger.info(f"Found {len(npy_files)} segmentation files")
 
@@ -66,9 +66,9 @@ def process_segmentation_frames(input_dir: str, output_path: str) -> None:
 
 if __name__ == "__main__":
     # Example usage
-    base_dir = "D:/2024-11-27/position12/"
+    base_dir = "D:/2024-11-27/position14/"
 
-    input_directory = os.path.join(base_dir, "./segmentation_frames")
+    input_directory = os.path.join(base_dir, "cellpose_export")
     output_file = os.path.join(base_dir, "segmentation.tif")
 
     process_segmentation_frames(input_directory, output_file)
