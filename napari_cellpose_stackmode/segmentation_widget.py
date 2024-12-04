@@ -16,6 +16,7 @@ from qtpy.QtWidgets import (
 )
 from tifffile import tifffile
 
+from .cell_correction_widget import CellCorrectionWidget
 from .segmentation import SegmentationHandler, SegmentationParameters
 from .data_manager import DataManager
 from .visualization_manager import VisualizationManager
@@ -104,6 +105,10 @@ class SegmentationWidget(QWidget):
             self.data_manager = None
             self.vis_manager = None
             self.segmentation = None
+
+            if hasattr(self, 'correction_widget'):
+                self.correction_widget.cleanup()
+
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
 
@@ -168,6 +173,10 @@ class SegmentationWidget(QWidget):
             # Update visualization
             self.vis_manager.update_tracking_visualization(masks)
 
+            # Add these new lines:
+            self.correction_widget.set_masks_layer(masks)
+            self.correction_widget.correction_made.connect(self._on_correction_made)
+
             # Enable buttons
             self.save_btn.setEnabled(True)
             self.export_btn.setEnabled(True)
@@ -183,6 +192,16 @@ class SegmentationWidget(QWidget):
         except Exception as e:
             self._on_segmentation_failed(str(e))
 
+        # Add this new method:
+    def _on_correction_made(self, updated_masks: np.ndarray):
+        """Handle corrections made to the segmentation"""
+        try:
+            self.data_manager.segmentation_data = updated_masks
+            self.vis_manager.update_tracking_visualization(updated_masks)
+            num_cells = len(np.unique(updated_masks)) - 1
+            self.status_label.setText(f"Correction applied. Current cell count: {num_cells}")
+        except Exception as e:
+            self._on_segmentation_failed(f"Error applying correction: {str(e)}")
     def _on_segmentation_failed(self, error_msg: str):
         """Handle segmentation failure"""
         logger.error(f"Segmentation failed: {error_msg}")
@@ -308,6 +327,10 @@ class SegmentationWidget(QWidget):
         correction_group = QGroupBox("Manual Correction Workflow")
         correction_layout = QVBoxLayout()
         correction_group.setLayout(correction_layout)
+
+        # Add correction widget
+        self.correction_widget = CellCorrectionWidget(self.viewer)
+        correction_layout.addWidget(self.correction_widget)
 
         # Add informative label
         info_label = QLabel(
@@ -735,3 +758,8 @@ class SegmentationWidget(QWidget):
                 "Import Failed",
                 f"Failed to import corrections: {str(e)}"
             )
+
+    def _setup_correction_tools(self):
+        self.correction_widget = CellCorrectionWidget(self.viewer)
+        # Add to your widget's layout
+        self.layout().addWidget(self.correction_widget)
