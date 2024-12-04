@@ -30,11 +30,22 @@ class CellCorrectionWidget(QWidget):
     LINE_THICKNESS = 3
     START_POINT_RADIUS = 5
     LINE_COLOR = 2
-    MAX_UNDO_STEPS = 20  # Maximum number of actions to keep in undo history
+    MAX_UNDO_STEPS = 20
 
-    def __init__(self, viewer: "napari.Viewer", parent: QWidget = None):
+    def __init__(self, viewer: "napari.Viewer", data_manager: "DataManager",
+                 visualization_manager: "VisualizationManager", parent: QWidget = None):
+        """Initialize the widget.
+
+        Args:
+            viewer: The napari viewer instance
+            data_manager: Data manager instance
+            visualization_manager: Visualization manager instance
+            parent: Parent widget
+        """
         super().__init__(parent)
         self.viewer = viewer
+        self.data_manager = data_manager
+        self.vis_manager = visualization_manager
         self.masks_layer = None
         self.drawing_layer = None
         self.current_frame = 0
@@ -178,18 +189,28 @@ class CellCorrectionWidget(QWidget):
                 self._store_undo_state(f"Delete cell {cell_id}")
 
                 self._updating = True
+                current_slice = int(self.viewer.dims.point[0])
+
                 if hasattr(self, '_full_masks') and self._full_masks is not None:
-                    current_slice = int(self.viewer.dims.point[0])
-                    new_mask = self._full_masks[current_slice].copy()
-                    new_mask[new_mask == cell_id] = 0
-                    self._full_masks[current_slice] = new_mask
-                    self.masks_layer.data = new_mask
-                    self.correction_made.emit(self._full_masks)
+                    # Update only current frame
+                    new_frame = self._full_masks[current_slice].copy()
+                    new_frame[new_frame == cell_id] = 0
+                    self._full_masks[current_slice] = new_frame
+
+                    # Update visualization for single frame
+                    self.vis_manager.update_tracking_visualization(
+                        (new_frame, current_slice)
+                    )
+
+                    # Update data manager without triggering full refresh
+                    self.data_manager.segmentation_data = self._full_masks
+
                 else:
                     new_mask = self.masks_layer.data.copy()
                     new_mask[new_mask == cell_id] = 0
                     self.masks_layer.data = new_mask
-                    self.correction_made.emit(new_mask)
+                    self.data_manager.segmentation_data = new_mask
+                    self.vis_manager.update_tracking_visualization(new_mask)
 
                 self.status_label.setText(f"Deleted cell {cell_id}")
                 logger.info(f"Deleted cell {cell_id}")
@@ -199,6 +220,34 @@ class CellCorrectionWidget(QWidget):
                 raise
             finally:
                 self._updating = False
+    def _on_correction_made(self, updated_masks: np.ndarray):
+        """Handle corrections without triggering cascading updates."""
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+
+            # Block napari events during update
+            with self.viewer.events.blocker_all():
+                # Update data manager
+                self.data_manager.segmentation_data = updated_masks
+
+                # Update visualization for current frame only
+                if hasattr(self, '_full_masks') and self._full_masks is not None:
+                    current_slice = int(self.viewer.dims.point[0])
+                    self.masks_layer.data = updated_masks[current_slice]
+                else:
+                    self.masks_layer.data = updated_masks
+
+                # Update status
+                num_cells = len(np.unique(updated_masks)) - 1
+                self.status_label.setText(f"Correction applied. Current cell count: {num_cells}")
+
+        except Exception as e:
+            logger.error(f"Error applying correction: {str(e)}")
+        finally:
+            self._updating = False
 
     def _finish_drawing(self):
         """Complete the cell drawing process."""
@@ -207,6 +256,11 @@ class CellCorrectionWidget(QWidget):
             return
 
         try:
+            if self._updating:
+                return
+
+            self._updating = True
+
             # Store state before adding new cell
             self._store_undo_state(f"Add cell {self.next_cell_id}")
 
@@ -214,43 +268,31 @@ class CellCorrectionWidget(QWidget):
             self.drawing_points.append(self.start_point)
             points = np.array(self.drawing_points)
 
-            # Create mask for the current slice
-            mask = np.zeros_like(self.masks_layer.data)
+            # Create mask for the new cell
+            mask = np.zeros_like(self._get_current_frame_mask())
             cv2.fillPoly(mask, [points[:, ::-1]], 1)
 
             # Update the appropriate slice
             if hasattr(self, '_full_masks') and self._full_masks is not None:
                 current_slice = int(self.viewer.dims.point[0])
-                new_mask = self._full_masks[current_slice].copy()
-                empty_space = new_mask == 0
-                new_mask[np.logical_and(mask > 0, empty_space)] = self.next_cell_id
-
-                # Update the full stack for this slice
-                self._full_masks[current_slice] = new_mask
-                # Update the display
-                self.masks_layer.data = new_mask
-                # Emit the full stack
+                self._full_masks[current_slice][mask > 0] = self.next_cell_id
+                # Single update call
                 self.correction_made.emit(self._full_masks)
             else:
-                # Single slice case
                 new_mask = self.masks_layer.data.copy()
-                empty_space = new_mask == 0
-                new_mask[np.logical_and(mask > 0, empty_space)] = self.next_cell_id
-                self.masks_layer.data = new_mask
+                new_mask[mask > 0] = self.next_cell_id
                 self.correction_made.emit(new_mask)
 
             self.next_cell_id += 1
 
-            # Reset drawing state
+        except Exception as e:
+            logger.error(f"Error finishing drawing: {e}")
+            raise
+        finally:
+            self._updating = False
             self.drawing_started = False
             self.start_point = None
             self._clear_drawing()
-
-        except Exception as e:
-            logger.error(f"Error finishing drawing: {e}")
-            self._clear_drawing()
-            raise
-
     def _connect_events(self):
         """Connect all event handlers"""
         # Existing connections
@@ -294,24 +336,6 @@ class CellCorrectionWidget(QWidget):
         except Exception as e:
             logger.error(f"Error setting masks layer: {e}")
             raise
-        finally:
-            self._updating = False
-
-    def _on_correction_made(self, updated_masks: np.ndarray):
-        """Handle corrections to prevent update loops."""
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-            if hasattr(self, '_full_masks') and self._full_masks is not None:
-                current_slice = int(self.viewer.dims.point[0])
-                self._full_masks[current_slice] = updated_masks
-                self.masks_layer.data = updated_masks
-                self.correction_made.emit(self._full_masks)
-            else:
-                self.masks_layer.data = updated_masks
-                self.correction_made.emit(updated_masks)
         finally:
             self._updating = False
 

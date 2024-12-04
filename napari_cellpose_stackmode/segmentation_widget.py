@@ -329,7 +329,11 @@ class SegmentationWidget(QWidget):
         correction_group.setLayout(correction_layout)
 
         # Add correction widget
-        self.correction_widget = CellCorrectionWidget(self.viewer)
+        self.correction_widget = CellCorrectionWidget(
+            self.viewer,
+            self.data_manager,
+            self.vis_manager
+        )
         correction_layout.addWidget(self.correction_widget)
 
         # Add informative label
