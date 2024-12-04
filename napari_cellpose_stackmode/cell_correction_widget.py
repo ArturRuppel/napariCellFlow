@@ -269,20 +269,47 @@ class CellCorrectionWidget(QWidget):
             points = np.array(self.drawing_points)
 
             # Create mask for the new cell
-            mask = np.zeros_like(self._get_current_frame_mask())
-            cv2.fillPoly(mask, [points[:, ::-1]], 1)
+            current_mask = self._get_current_frame_mask()
+            if current_mask is None:
+                return
+
+            new_cell_mask = np.zeros_like(current_mask)
+            cv2.fillPoly(new_cell_mask, [points[:, ::-1]], 1)
 
             # Update the appropriate slice
             if hasattr(self, '_full_masks') and self._full_masks is not None:
                 current_slice = int(self.viewer.dims.point[0])
-                self._full_masks[current_slice][mask > 0] = self.next_cell_id
-                # Single update call
-                self.correction_made.emit(self._full_masks)
-            else:
-                new_mask = self.masks_layer.data.copy()
-                new_mask[mask > 0] = self.next_cell_id
-                self.correction_made.emit(new_mask)
 
+                # Update only the current frame
+                new_frame = self._full_masks[current_slice].copy()
+                new_frame[new_cell_mask > 0] = self.next_cell_id
+                self._full_masks[current_slice] = new_frame
+
+                # Update visualization for single frame
+                self.vis_manager.update_tracking_visualization(
+                    (new_frame, current_slice)
+                )
+
+                # Update data manager without triggering full refresh
+                self.data_manager.segmentation_data = self._full_masks
+
+                # Update the masks layer for the current frame
+                if self.masks_layer is not None:
+                    current_data = self.masks_layer.data
+                    current_data[current_slice] = new_frame
+                    with self.viewer.events.blocker_all():
+                        self.masks_layer.data = current_data
+                        self.masks_layer.refresh()
+            else:
+                # Handle 2D data
+                new_mask = self.masks_layer.data.copy()
+                new_mask[new_cell_mask > 0] = self.next_cell_id
+                self.masks_layer.data = new_mask
+                self.data_manager.segmentation_data = new_mask
+                self.vis_manager.update_tracking_visualization(new_mask)
+
+            # Update status and increment cell ID
+            self.status_label.setText(f"Added new cell {self.next_cell_id}")
             self.next_cell_id += 1
 
         except Exception as e:
@@ -313,44 +340,70 @@ class CellCorrectionWidget(QWidget):
         try:
             self._updating = True
 
-            # Ensure proper dimensions for editing
-            if masks.ndim == 3:
-                self._full_masks = masks.copy()  # Store a copy to prevent reference issues
-                current_slice = int(self.viewer.dims.point[0])
-                display_masks = self._full_masks[current_slice].copy()
-            else:
-                self._full_masks = None
-                display_masks = masks.copy()
+            # First store the full masks
+            self._full_masks = masks.copy()
 
-            if self.masks_layer is None:
-                self.masks_layer = self.viewer.add_labels(
-                    display_masks,
-                    name='Cell Masks',
-                    opacity=0.5
-                )
+            # If layer doesn't exist, initialize it
+            if self.vis_manager.tracking_layer is None:
+                if masks.ndim == 3:
+                    self.masks_layer = self.viewer.add_labels(
+                        masks,
+                        name='Cell Tracking',
+                        opacity=0.5
+                    )
+                else:
+                    self.masks_layer = self.viewer.add_labels(
+                        masks[np.newaxis, ...] if masks.ndim == 2 else masks,
+                        name='Cell Tracking',
+                        opacity=0.5
+                    )
+                self.vis_manager.tracking_layer = self.masks_layer
             else:
-                self.masks_layer.data = display_masks
+                # Use existing layer
+                self.masks_layer = self.vis_manager.tracking_layer
+
+                # Update the data in a way that preserves dimensionality
+                if masks.ndim == 2:
+                    masks = masks[np.newaxis, ...]
+
+                # Ensure the layer's data maintains proper dimensionality
+                current_data = self.masks_layer.data
+                if current_data.ndim != masks.ndim:
+                    if current_data.ndim > masks.ndim:
+                        masks = masks[np.newaxis, ...]
+                    else:
+                        current_data = current_data[np.newaxis, ...]
+
+                # Update the layer data
+                self.masks_layer.data = masks
 
             self.next_cell_id = masks.max() + 1
 
         except Exception as e:
-            logger.error(f"Error setting masks layer: {e}")
+            logger.error(f"Error setting masks layer: {str(e)}")
             raise
         finally:
             self._updating = False
 
     def _on_mouse_wheel(self, viewer, event):
-        """Handle mouse wheel events to update current frame."""
-        if self._updating:
-            return
-
+        """Handle mouse wheel events for slice navigation."""
         if hasattr(self, '_full_masks') and self._full_masks is not None:
             try:
                 self._updating = True
                 current_slice = int(self.viewer.dims.point[0])
+
                 if self.masks_layer is not None:
-                    self.masks_layer.data = self._full_masks[current_slice].copy()
+                    # Update just the current slice data while maintaining dimensionality
+                    with self.viewer.events.blocker_all():
+                        if self._full_masks.ndim == 3:
+                            current_data = self.masks_layer.data
+                            current_data[current_slice] = self._full_masks[current_slice].copy()
+                            self.masks_layer.refresh()
+                        else:
+                            self.masks_layer.data = self._full_masks
+
                     self._clear_drawing()
+
             finally:
                 self._updating = False
 
