@@ -250,7 +250,7 @@ class CellCorrectionWidget(QWidget):
             self._updating = False
 
     def _finish_drawing(self):
-        """Complete the cell drawing process."""
+        """Complete the cell drawing process without overwriting existing cells."""
         if not self.drawing_points or len(self.drawing_points) < 3:
             self._clear_drawing()
             return
@@ -273,16 +273,28 @@ class CellCorrectionWidget(QWidget):
             if current_mask is None:
                 return
 
-            new_cell_mask = np.zeros_like(current_mask)
+            # Create a binary mask for the drawn area
+            new_cell_mask = np.zeros_like(current_mask, dtype=np.uint8)
             cv2.fillPoly(new_cell_mask, [points[:, ::-1]], 1)
 
-            # Update the appropriate slice
+            # Create a mask for existing cells
+            existing_cells_mask = (current_mask > 0).astype(np.uint8)
+
+            # Remove overlap with existing cells from the new cell mask
+            # using bitwise operations
+            non_overlapping_mask = cv2.bitwise_and(
+                new_cell_mask,
+                cv2.bitwise_not(existing_cells_mask)
+            )
+
+            # Update the appropriate slice with the non-overlapping mask
             if hasattr(self, '_full_masks') and self._full_masks is not None:
                 current_slice = int(self.viewer.dims.point[0])
 
                 # Update only the current frame
                 new_frame = self._full_masks[current_slice].copy()
-                new_frame[new_cell_mask > 0] = self.next_cell_id
+                # Only fill areas where there are no existing cells
+                new_frame[non_overlapping_mask > 0] = self.next_cell_id
                 self._full_masks[current_slice] = new_frame
 
                 # Update visualization for single frame
@@ -303,14 +315,25 @@ class CellCorrectionWidget(QWidget):
             else:
                 # Handle 2D data
                 new_mask = self.masks_layer.data.copy()
-                new_mask[new_cell_mask > 0] = self.next_cell_id
+                new_mask[non_overlapping_mask > 0] = self.next_cell_id
                 self.masks_layer.data = new_mask
                 self.data_manager.segmentation_data = new_mask
                 self.vis_manager.update_tracking_visualization(new_mask)
 
-            # Update status and increment cell ID
-            self.status_label.setText(f"Added new cell {self.next_cell_id}")
-            self.next_cell_id += 1
+            # Calculate how much of the drawn area was actually filled
+            total_drawn_area = np.sum(new_cell_mask)
+            filled_area = np.sum(non_overlapping_mask)
+            fill_percentage = (filled_area / total_drawn_area * 100) if total_drawn_area > 0 else 0
+
+            # Update status with information about the fill
+            status_msg = f"Added new cell {self.next_cell_id}"
+            if fill_percentage < 100:
+                status_msg += f" ({fill_percentage:.1f}% of drawn area filled)"
+            self.status_label.setText(status_msg)
+
+            # Only increment cell ID if we actually added some new area
+            if filled_area > 0:
+                self.next_cell_id += 1
 
         except Exception as e:
             logger.error(f"Error finishing drawing: {e}")
