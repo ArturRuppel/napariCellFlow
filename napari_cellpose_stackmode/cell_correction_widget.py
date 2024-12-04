@@ -12,6 +12,7 @@ import cv2
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Union, Dict
+from .debug_logging import log_state_changes, log_array_info, logger
 
 logger = logging.getLogger(__name__)
 
@@ -302,13 +303,16 @@ class CellCorrectionWidget(QWidget):
             self._updating = False
             self._clear_drawing()
 
+    @log_state_changes
     def _delete_cell_at_position(self, coords):
         """Delete cell at the given coordinates."""
         if self._updating or not self._validate_coords(coords):
+            logger.debug("Deletion skipped - updating flag or invalid coords")
             return
 
         current_mask = self._get_current_frame_mask()
         if current_mask is None:
+            logger.debug("Deletion skipped - no current mask")
             return
 
         cell_id = current_mask[coords[0], coords[1]]
@@ -320,11 +324,20 @@ class CellCorrectionWidget(QWidget):
                 self._updating = True
                 current_slice = int(self.viewer.dims.point[0])
 
+                logger.debug(f"Attempting to delete cell {cell_id} at coords {coords} in frame {current_slice}")
+
                 if hasattr(self, '_full_masks') and self._full_masks is not None:
+                    logger.debug(f"Using 3D mode deletion")
+                    # Log state before modification
+                    log_array_info(self._full_masks[current_slice], "Frame before deletion")
+
                     # Update only current frame
                     new_frame = self._full_masks[current_slice].copy()
                     new_frame[new_frame == cell_id] = 0
                     self._full_masks[current_slice] = new_frame
+
+                    # Log state after modification
+                    log_array_info(new_frame, "Frame after deletion")
 
                     # Update visualization for single frame
                     self.vis_manager.update_tracking_visualization(
@@ -333,23 +346,29 @@ class CellCorrectionWidget(QWidget):
 
                     # Update data manager without triggering full refresh
                     self.data_manager.segmentation_data = self._full_masks
-
                 else:
+                    logger.debug("Using 2D mode deletion")
+                    # Log state before modification
+                    log_array_info(self.masks_layer.data, "Mask before deletion")
+
                     new_mask = self.masks_layer.data.copy()
                     new_mask[new_mask == cell_id] = 0
                     self.masks_layer.data = new_mask
+
+                    # Log state after modification
+                    log_array_info(new_mask, "Mask after deletion")
+
                     self.data_manager.segmentation_data = new_mask
                     self.vis_manager.update_tracking_visualization(new_mask)
 
                 self.status_label.setText(f"Deleted cell {cell_id}")
-                logger.info(f"Deleted cell {cell_id}")
+                logger.info(f"Successfully deleted cell {cell_id} in frame {current_slice}")
 
             except Exception as e:
-                logger.error(f"Error deleting cell: {e}")
+                logger.error(f"Error deleting cell: {e}", exc_info=True)
                 raise
             finally:
                 self._updating = False
-
     def _on_mouse_wheel(self, viewer, event):
         """Handle mouse wheel events for slice navigation."""
         if hasattr(self, '_full_masks') and self._full_masks is not None:
@@ -406,13 +425,16 @@ class CellCorrectionWidget(QWidget):
         finally:
             self._updating = False
 
+    @log_state_changes
     def set_masks_layer(self, masks: np.ndarray):
         """Set or update the masks layer."""
         if self._updating:
+            logger.debug("Set masks cancelled - updating in progress")
             return
 
         try:
             self._updating = True
+            logger.debug(f"Setting masks layer with shape {masks.shape}")
 
             # First store the full masks
             self._full_masks = masks.copy()
@@ -459,17 +481,22 @@ class CellCorrectionWidget(QWidget):
         finally:
             self._updating = False
 
+    @log_state_changes
     def _finish_drawing(self):
         """Complete the cell drawing process."""
         if not self.drawing_points or len(self.drawing_points) < 3:
+            logger.debug("Drawing cancelled - insufficient points")
             self._clear_drawing()
             return
 
         try:
             if self._updating:
+                logger.debug("Drawing cancelled - updating in progress")
                 return
 
             self._updating = True
+            current_frame = int(self.viewer.dims.point[0])
+            logger.debug(f"Finishing drawing in frame {current_frame}")
 
             # Store state before adding new cell
             self._store_undo_state(f"Add cell {self.next_cell_id}")

@@ -21,6 +21,7 @@ from .segmentation import SegmentationHandler, SegmentationParameters
 from .data_manager import DataManager
 from .visualization_manager import VisualizationManager
 from .segmentation_state import SegmentationStateManager
+from .debug_logging import log_state_changes, log_array_info, logger
 
 
 logger = logging.getLogger(__name__)
@@ -80,18 +81,23 @@ class SegmentationWidget(QWidget):
         # Update UI states
         self._update_button_states()
 
-    def _run_segmentation(self):
+    @log_state_changes
+    def _run_segmentation(self, preserve_existing=False):
         """Run segmentation on current frame"""
         try:
             if not self._ensure_model_initialized():
+                logger.debug("Segmentation cancelled - model not initialized")
                 return
 
             image_layer = self._get_active_image_layer()
             if image_layer is None:
+                logger.debug("Segmentation cancelled - no image layer")
                 raise ValueError("No image layer selected")
 
-            data = image_layer.data
             current_frame = int(self.viewer.dims.point[0])
+            logger.debug(f"Running segmentation on frame {current_frame}")
+
+            data = image_layer.data
 
             # Initialize state if needed, preserving existing data
             if self.state_manager.state.full_stack is None:
@@ -180,10 +186,11 @@ class SegmentationWidget(QWidget):
         except Exception as e:
             self._on_segmentation_failed(str(e))
 
+    @log_state_changes
     def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
         """Handle completion of segmentation"""
         try:
-            # Get final results from state manager
+            logger.debug("Processing segmentation completion")
             final_masks, metadata = self.state_manager.get_results()
 
             # Update data manager

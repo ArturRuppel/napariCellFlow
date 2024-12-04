@@ -4,6 +4,8 @@ import numpy as np
 import napari
 from napari.utils.transforms import Affine
 
+from napari_cellpose_stackmode.debug_logging import log_visualization_ops
+
 logger = logging.getLogger(__name__)
 
 
@@ -17,6 +19,7 @@ class VisualizationManager:
         self._updating = False
         self._current_dims = None  # Track current data dimensions
 
+    @log_visualization_ops
     def update_tracking_visualization(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> None:
         """
         Update the tracking visualization with new data.
@@ -25,10 +28,12 @@ class VisualizationManager:
             data: Either a full 3D stack (np.ndarray) or a tuple of (2D frame, frame_index)
         """
         if self._updating:
+            logger.debug("Visualization update cancelled - updating in progress")
             return
 
         try:
             self._updating = True
+            logger.debug(f"Updating visualization with data type: {type(data)}")
 
             # Handle input data
             if isinstance(data, tuple):
@@ -45,10 +50,13 @@ class VisualizationManager:
             if self.tracking_layer is not None:
                 self.tracking_layer.refresh()
 
+    @log_visualization_ops
     def _update_single_frame(self, frame_data: np.ndarray, frame_index: int) -> None:
         """Update a single frame in the visualization."""
         if frame_data.ndim != 2:
+            logger.debug(f"Invalid frame data shape: {frame_data.shape}")
             raise ValueError(f"Frame data must be 2D, got shape {frame_data.shape}")
+        logger.debug(f"Updating frame {frame_index}")
 
         # Initialize tracking layer if needed
         if self.tracking_layer is None:
@@ -70,8 +78,10 @@ class VisualizationManager:
             current_data[frame_index] = frame_data
             self.tracking_layer.data = current_data
 
+    @log_visualization_ops
     def _update_full_stack(self, stack_data: np.ndarray) -> None:
         """Update the visualization with a full stack of data."""
+        logger.debug(f"Updating full stack with shape {stack_data.shape}")
         # Handle 2D data
         if stack_data.ndim == 2:
             stack_data = stack_data[np.newaxis, ...]

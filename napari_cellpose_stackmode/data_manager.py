@@ -2,6 +2,7 @@
 import logging
 from pathlib import Path
 from typing import Optional
+from .debug_logging import log_state_changes, log_array_info, logger, log_data_manager_ops
 
 import numpy as np
 import tifffile
@@ -15,27 +16,8 @@ class DataManager:
     def __init__(self):
         self._updating = False
         self._preprocessed_data = None
-        self._segmentation_data = None  # Add this
+        self._segmentation_data = None
         self._tracked_data = None
-
-    @property
-    def segmentation_data(self) -> Optional[np.ndarray]:
-        """Get the segmentation data"""
-        return self._segmentation_data
-
-    @segmentation_data.setter
-    def segmentation_data(self, data: Optional[np.ndarray]):
-        """Set the segmentation data"""
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-            if data is not None and not isinstance(data, np.ndarray):
-                raise ValueError("Segmentation data must be a numpy array")
-            self._segmentation_data = data
-        finally:
-            self._updating = False
 
     @property
     def preprocessed_data(self) -> Optional[np.ndarray]:
@@ -57,14 +39,40 @@ class DataManager:
             self._updating = False
 
     @property
+    @log_data_manager_ops
+    def segmentation_data(self) -> Optional[np.ndarray]:
+        """Get the segmentation data"""
+        return self._segmentation_data
+
+    @segmentation_data.setter
+    @log_data_manager_ops
+    def segmentation_data(self, data: Optional[np.ndarray]):
+        """Set the segmentation data"""
+        if self._updating:
+            logger.debug("Segmentation data update cancelled - updating in progress")
+            return
+
+        try:
+            self._updating = True
+            if data is not None and not isinstance(data, np.ndarray):
+                logger.debug(f"Invalid data type: {type(data)}")
+                raise ValueError("Segmentation data must be a numpy array")
+            self._segmentation_data = data
+        finally:
+            self._updating = False
+
+    @property
+    @log_data_manager_ops
     def tracked_data(self) -> Optional[np.ndarray]:
         """Get the tracked data"""
         return self._tracked_data
 
     @tracked_data.setter
+    @log_data_manager_ops
     def tracked_data(self, data: Optional[np.ndarray]):
         """Set the tracked data"""
         if self._updating:
+            logger.debug("Tracked data update cancelled - updating in progress")
             return
 
         try:
@@ -74,6 +82,7 @@ class DataManager:
             self._tracked_data = data
         finally:
             self._updating = False
+
     def save_tracking_results(self, path: Path) -> None:
         """Save tracking results to a TIFF file."""
         try:
