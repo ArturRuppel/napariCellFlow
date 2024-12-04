@@ -1,12 +1,26 @@
 import numpy as np
 from qtpy.QtCore import Qt, Signal
-from qtpy.QtWidgets import QWidget, QVBoxLayout, QPushButton, QLabel, QApplication
+from qtpy.QtWidgets import (
+    QWidget, QVBoxLayout, QPushButton, QLabel, QApplication,
+    QHBoxLayout, QShortcut
+)
+from qtpy.QtGui import QKeySequence
 import napari
 from napari.layers import Labels
 import logging
 import cv2
+from collections import deque
+from dataclasses import dataclass
+from typing import Optional, Union, Dict
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class UndoAction:
+    """Represents a single undoable action"""
+    frame: Optional[int]  # Frame number for 3D stacks, None for 2D
+    previous_state: np.ndarray  # Previous state of the masks
+    description: str  # Description of the action
 
 
 class CellCorrectionWidget(QWidget):
@@ -16,6 +30,7 @@ class CellCorrectionWidget(QWidget):
     LINE_THICKNESS = 3
     START_POINT_RADIUS = 5
     LINE_COLOR = 2
+    MAX_UNDO_STEPS = 20  # Maximum number of actions to keep in undo history
 
     def __init__(self, viewer: "napari.Viewer", parent: QWidget = None):
         super().__init__(parent)
@@ -33,11 +48,220 @@ class CellCorrectionWidget(QWidget):
         self.MIN_DRAWING_POINTS = 5
         self.ctrl_pressed = False
         self.toggle_state = False
-        self._updating = False  # Flag to prevent recursive updates
+        self._updating = False
+
+        # Undo history
+        self.undo_stack = deque(maxlen=self.MAX_UNDO_STEPS)
 
         self._setup_ui()
         self._connect_events()
+        self._setup_shortcuts()
         QApplication.instance().installEventFilter(self)
+
+    def _setup_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # Status label
+        self.status_label = QLabel("Ready")
+        layout.addWidget(self.status_label)
+
+        # Control buttons in a horizontal layout
+        buttons_layout = QHBoxLayout()
+
+        # Drawing mode toggle
+        self.toggle_draw_btn = QPushButton("Toggle Drawing Mode (or hold Ctrl)")
+        self.toggle_draw_btn.setCheckable(True)
+        buttons_layout.addWidget(self.toggle_draw_btn)
+
+        # Undo button
+        self.undo_btn = QPushButton("Undo (Ctrl+Z)")
+        self.undo_btn.setEnabled(False)
+        buttons_layout.addWidget(self.undo_btn)
+
+        layout.addLayout(buttons_layout)
+
+        # Updated instructions
+        instructions = QLabel(
+            "Drawing Mode:\n"
+            "- Hold Ctrl + Right click and drag to draw cell boundary\n"
+            "- Return to start point (marked with circle) to complete the cell\n"
+            "- Left click to delete cells\n"
+            "- Ctrl+Z to undo last action\n\n"
+            "Selection Mode:\n"
+            "- Right-click: Select cell\n"
+            "- Delete: Remove selected cell"
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
+    def _setup_shortcuts(self):
+        """Set up keyboard shortcuts"""
+        self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self.undo_shortcut.activated.connect(self.undo_last_action)
+
+    def _store_undo_state(self, description: str):
+        """Store current state for undo"""
+        if self._updating:
+            return
+
+        try:
+            if self.masks_layer is None:
+                return
+
+            if hasattr(self, '_full_masks') and self._full_masks is not None:
+                current_frame = int(self.viewer.dims.point[0])
+                # Store only the current frame's state for 3D data
+                self.undo_stack.append(UndoAction(
+                    frame=current_frame,
+                    previous_state=self._full_masks[current_frame].copy(),
+                    description=description
+                ))
+            else:
+                # Store the entire 2D mask
+                self.undo_stack.append(UndoAction(
+                    frame=None,
+                    previous_state=self.masks_layer.data.copy(),
+                    description=description
+                ))
+
+            self.undo_btn.setEnabled(True)
+            logger.debug(f"Stored undo state: {description}")
+
+        except Exception as e:
+            logger.error(f"Error storing undo state: {e}")
+
+    def undo_last_action(self):
+        """Undo the last action"""
+        if not self.undo_stack:
+            return
+
+        try:
+            self._updating = True
+            action = self.undo_stack.pop()
+
+            if hasattr(self, '_full_masks') and self._full_masks is not None:
+                if action.frame is not None:
+                    self._full_masks[action.frame] = action.previous_state
+                    self.masks_layer.data = action.previous_state
+                    self.correction_made.emit(self._full_masks)
+            else:
+                self.masks_layer.data = action.previous_state
+                self.correction_made.emit(action.previous_state)
+
+            self.status_label.setText(f"Undid: {action.description}")
+            logger.info(f"Undid action: {action.description}")
+
+            # Update undo button state
+            self.undo_btn.setEnabled(len(self.undo_stack) > 0)
+
+        except Exception as e:
+            logger.error(f"Error during undo: {e}")
+            raise
+        finally:
+            self._updating = False
+            self._clear_drawing()
+
+    def _delete_cell_at_position(self, coords):
+        """Delete cell at the given coordinates."""
+        if self._updating or not self._validate_coords(coords):
+            return
+
+        current_mask = self._get_current_frame_mask()
+        if current_mask is None:
+            return
+
+        cell_id = current_mask[coords[0], coords[1]]
+        if cell_id > 0:
+            try:
+                # Store state before modification
+                self._store_undo_state(f"Delete cell {cell_id}")
+
+                self._updating = True
+                if hasattr(self, '_full_masks') and self._full_masks is not None:
+                    current_slice = int(self.viewer.dims.point[0])
+                    new_mask = self._full_masks[current_slice].copy()
+                    new_mask[new_mask == cell_id] = 0
+                    self._full_masks[current_slice] = new_mask
+                    self.masks_layer.data = new_mask
+                    self.correction_made.emit(self._full_masks)
+                else:
+                    new_mask = self.masks_layer.data.copy()
+                    new_mask[new_mask == cell_id] = 0
+                    self.masks_layer.data = new_mask
+                    self.correction_made.emit(new_mask)
+
+                self.status_label.setText(f"Deleted cell {cell_id}")
+                logger.info(f"Deleted cell {cell_id}")
+
+            except Exception as e:
+                logger.error(f"Error deleting cell: {e}")
+                raise
+            finally:
+                self._updating = False
+
+    def _finish_drawing(self):
+        """Complete the cell drawing process."""
+        if not self.drawing_points or len(self.drawing_points) < 3:
+            self._clear_drawing()
+            return
+
+        try:
+            # Store state before adding new cell
+            self._store_undo_state(f"Add cell {self.next_cell_id}")
+
+            # Close the contour
+            self.drawing_points.append(self.start_point)
+            points = np.array(self.drawing_points)
+
+            # Create mask for the current slice
+            mask = np.zeros_like(self.masks_layer.data)
+            cv2.fillPoly(mask, [points[:, ::-1]], 1)
+
+            # Update the appropriate slice
+            if hasattr(self, '_full_masks') and self._full_masks is not None:
+                current_slice = int(self.viewer.dims.point[0])
+                new_mask = self._full_masks[current_slice].copy()
+                empty_space = new_mask == 0
+                new_mask[np.logical_and(mask > 0, empty_space)] = self.next_cell_id
+
+                # Update the full stack for this slice
+                self._full_masks[current_slice] = new_mask
+                # Update the display
+                self.masks_layer.data = new_mask
+                # Emit the full stack
+                self.correction_made.emit(self._full_masks)
+            else:
+                # Single slice case
+                new_mask = self.masks_layer.data.copy()
+                empty_space = new_mask == 0
+                new_mask[np.logical_and(mask > 0, empty_space)] = self.next_cell_id
+                self.masks_layer.data = new_mask
+                self.correction_made.emit(new_mask)
+
+            self.next_cell_id += 1
+
+            # Reset drawing state
+            self.drawing_started = False
+            self.start_point = None
+            self._clear_drawing()
+
+        except Exception as e:
+            logger.error(f"Error finishing drawing: {e}")
+            self._clear_drawing()
+            raise
+
+    def _connect_events(self):
+        """Connect all event handlers"""
+        # Existing connections
+        self.viewer.mouse_drag_callbacks.append(self._on_mouse_drag)
+        self.viewer.mouse_move_callbacks.append(self._on_mouse_move)
+        self.viewer.mouse_wheel_callbacks.append(self._on_mouse_wheel)
+        self.viewer.bind_key('Delete', self._on_delete_pressed)
+        self.toggle_draw_btn.toggled.connect(self._handle_toggle_button)
+
+        # Add undo button connection
+        self.undo_btn.clicked.connect(self.undo_last_action)
 
     def set_masks_layer(self, masks: np.ndarray):
         """Set or update the masks layer."""
@@ -90,41 +314,6 @@ class CellCorrectionWidget(QWidget):
                 self.correction_made.emit(updated_masks)
         finally:
             self._updating = False
-
-    def _delete_cell_at_position(self, coords):
-        """Delete cell at the given coordinates."""
-        if self._updating or not self._validate_coords(coords):
-            return
-
-        current_mask = self._get_current_frame_mask()
-        if current_mask is None:
-            return
-
-        cell_id = current_mask[coords[0], coords[1]]
-        if cell_id > 0:
-            try:
-                self._updating = True
-                if hasattr(self, '_full_masks') and self._full_masks is not None:
-                    current_slice = int(self.viewer.dims.point[0])
-                    new_mask = self._full_masks[current_slice].copy()
-                    new_mask[new_mask == cell_id] = 0
-                    self._full_masks[current_slice] = new_mask
-                    self.masks_layer.data = new_mask
-                    self.correction_made.emit(self._full_masks)
-                else:
-                    new_mask = self.masks_layer.data.copy()
-                    new_mask[new_mask == cell_id] = 0
-                    self.masks_layer.data = new_mask
-                    self.correction_made.emit(new_mask)
-
-                self.status_label.setText(f"Deleted cell {cell_id}")
-                logger.info(f"Deleted cell {cell_id}")
-
-            except Exception as e:
-                logger.error(f"Error deleting cell: {e}")
-                raise
-            finally:
-                self._updating = False
 
     def _on_mouse_wheel(self, viewer, event):
         """Handle mouse wheel events to update current frame."""
@@ -203,32 +392,6 @@ class CellCorrectionWidget(QWidget):
             # Add ability to delete cells with left click in drawing mode
             self._delete_cell_at_position(coords)
 
-    def _setup_ui(self):
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-
-        # Status label
-        self.status_label = QLabel("Ready")
-        layout.addWidget(self.status_label)
-
-        # Control buttons
-        self.toggle_draw_btn = QPushButton("Toggle Drawing Mode (or hold Ctrl)")
-        self.toggle_draw_btn.setCheckable(True)
-        layout.addWidget(self.toggle_draw_btn)
-
-        # Updated instructions
-        instructions = QLabel(
-            "Drawing Mode:\n"
-            "- Hold Ctrl + Right click and drag to draw cell boundary\n"
-            "- Return to start point (marked with circle) to complete the cell\n"
-            "- Left click to delete cells\n\n"
-            "Selection Mode:\n"
-            "- Right-click: Select cell\n"
-            "- Delete: Remove selected cell"
-        )
-        instructions.setWordWrap(True)
-        layout.addWidget(instructions)
-
     def _get_current_frame_mask(self):
         """Get mask for the current frame."""
         if self.masks_layer is None:
@@ -255,53 +418,6 @@ class CellCorrectionWidget(QWidget):
             # For 2D data
             return np.zeros_like(self.masks_layer.data)
 
-    def _finish_drawing(self):
-        """Complete the cell drawing process."""
-        if not self.drawing_points or len(self.drawing_points) < 3:
-            self._clear_drawing()
-            return
-
-        try:
-            # Close the contour
-            self.drawing_points.append(self.start_point)
-            points = np.array(self.drawing_points)
-
-            # Create mask for the current slice
-            mask = np.zeros_like(self.masks_layer.data)
-            cv2.fillPoly(mask, [points[:, ::-1]], 1)
-
-            # Update the appropriate slice
-            if hasattr(self, '_full_masks') and self._full_masks is not None:
-                current_slice = int(self.viewer.dims.point[0])
-                new_mask = self._full_masks[current_slice].copy()
-                empty_space = new_mask == 0
-                new_mask[np.logical_and(mask > 0, empty_space)] = self.next_cell_id
-
-                # Update the full stack for this slice
-                self._full_masks[current_slice] = new_mask
-                # Update the display
-                self.masks_layer.data = new_mask
-                # Emit the full stack
-                self.correction_made.emit(self._full_masks)
-            else:
-                # Single slice case
-                new_mask = self.masks_layer.data.copy()
-                empty_space = new_mask == 0
-                new_mask[np.logical_and(mask > 0, empty_space)] = self.next_cell_id
-                self.masks_layer.data = new_mask
-                self.correction_made.emit(new_mask)
-
-            self.next_cell_id += 1
-
-            # Reset drawing state
-            self.drawing_started = False
-            self.start_point = None
-            self._clear_drawing()
-
-        except Exception as e:
-            logger.error(f"Error finishing drawing: {e}")
-            self._clear_drawing()
-            raise
     def _handle_selection(self, coords):
         """Handle cell selection."""
         if not self._validate_coords(coords):
@@ -380,18 +496,6 @@ class CellCorrectionWidget(QWidget):
                 self._update_drawing_state()
                 return False  # Don't consume the event
         return super().eventFilter(watched_object, event)
-
-    def _connect_events(self):
-        # Mouse events
-        self.viewer.mouse_drag_callbacks.append(self._on_mouse_drag)
-        self.viewer.mouse_move_callbacks.append(self._on_mouse_move)
-        self.viewer.mouse_wheel_callbacks.append(self._on_mouse_wheel)
-
-        # Key bindings
-        self.viewer.bind_key('Delete', self._on_delete_pressed)
-
-        # Button events
-        self.toggle_draw_btn.toggled.connect(self._handle_toggle_button)
 
     def _handle_toggle_button(self, checked):
         """Handle toggle button state changes"""
