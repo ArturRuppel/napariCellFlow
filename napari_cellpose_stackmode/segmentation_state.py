@@ -4,6 +4,8 @@ from typing import Optional, Dict, Any, Tuple
 import numpy as np
 from pathlib import Path
 
+from napari_cellpose_stackmode.debug_logging import log_state_changes
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,10 +114,20 @@ class SegmentationStateManager:
             logger.error(f"Failed to initialize processing: {e}")
             raise
 
+    @log_state_changes
     def update_frame_result(self, frame_index: int, mask: np.ndarray, metadata: Dict[str, Any] = None) -> None:
         """Update results for a single frame"""
         try:
+            self._updating = True
+            logger.debug(f"Updating frame {frame_index} result")
+            logger.debug(f"Input mask shape: {mask.shape}")
+            logger.debug(f"Unique values in input mask: {np.unique(mask)}")
+
             self.state.update_frame(frame_index, mask)
+
+            logger.debug(f"Updated full stack shape: {self.state.full_stack.shape}")
+            logger.debug(f"Unique values in updated full stack: {np.unique(self.state.full_stack)}")
+
             if metadata:
                 self.state.metadata[f"frame_{frame_index}"] = metadata
             self._notify_state_change()

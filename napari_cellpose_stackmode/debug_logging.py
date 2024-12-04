@@ -15,7 +15,7 @@ logger.addHandler(fh)
 
 
 def log_array_info(arr: Optional[np.ndarray], name: str) -> None:
-    """Log detailed information about a numpy array"""
+    """Log essential information about a numpy array without dumping its contents"""
     if arr is None:
         logger.debug(f"{name} is None")
         return
@@ -23,20 +23,29 @@ def log_array_info(arr: Optional[np.ndarray], name: str) -> None:
     logger.debug(f"{name} info:")
     logger.debug(f"  Shape: {arr.shape}")
     logger.debug(f"  Dtype: {arr.dtype}")
-    logger.debug(f"  Unique values: {np.unique(arr)}")
+
+    # Only log unique values if array is small
+    if arr.size < 1000:  # arbitrary threshold
+        logger.debug(f"  Unique values: {np.unique(arr)}")
+    else:
+        logger.debug(f"  Number of unique values: {len(np.unique(arr))}")
+
     if arr.size > 0:
         logger.debug(f"  Min: {arr.min()}, Max: {arr.max()}")
 
 
 def log_state_changes(func: Callable) -> Callable:
     """Decorator to log state changes in key methods"""
-
     @wraps(func)
     def wrapper(self, *args, **kwargs):
-        # Log entry
-        logger.debug(f"Entering {func.__name__}")
-        logger.debug(f"  Args: {args}")
-        logger.debug(f"  Kwargs: {kwargs}")
+        # Log entry but skip logging args for functions that handle large arrays
+        if func.__name__ in ['_on_segmentation_completed', 'segment_frame']:
+            logger.debug(f"Entering {func.__name__}")
+        else:
+            logger.debug(f"Entering {func.__name__}")
+            logger.debug(f"  Args: {args}")
+            logger.debug(f"  Kwargs: {kwargs}")
+
 
         # Log initial state
         if hasattr(self, 'masks_layer') and self.masks_layer is not None:

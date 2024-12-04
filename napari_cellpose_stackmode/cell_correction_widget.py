@@ -318,55 +318,31 @@ class CellCorrectionWidget(QWidget):
         cell_id = current_mask[coords[0], coords[1]]
         if cell_id > 0:
             try:
-                # Store state before modification
                 self._store_undo_state(f"Delete cell {cell_id}")
-
                 self._updating = True
                 current_slice = int(self.viewer.dims.point[0])
 
-                logger.debug(f"Attempting to delete cell {cell_id} at coords {coords} in frame {current_slice}")
+                # Create a copy of just the current frame
+                new_frame = current_mask.copy()
+                new_frame[new_frame == cell_id] = 0
 
+                # Update only the current frame in the full stack
                 if hasattr(self, '_full_masks') and self._full_masks is not None:
-                    logger.debug(f"Using 3D mode deletion")
-                    # Log state before modification
-                    log_array_info(self._full_masks[current_slice], "Frame before deletion")
-
-                    # Update only current frame
-                    new_frame = self._full_masks[current_slice].copy()
-                    new_frame[new_frame == cell_id] = 0
                     self._full_masks[current_slice] = new_frame
 
-                    # Log state after modification
-                    log_array_info(new_frame, "Frame after deletion")
+                # Update visualization for single frame
+                self.vis_manager.update_tracking_visualization(
+                    (new_frame, current_slice)
+                )
 
-                    # Update visualization for single frame
-                    self.vis_manager.update_tracking_visualization(
-                        (new_frame, current_slice)
-                    )
-
-                    # Update data manager without triggering full refresh
+                # Update data manager
+                if hasattr(self, '_full_masks'):
                     self.data_manager.segmentation_data = self._full_masks
                 else:
-                    logger.debug("Using 2D mode deletion")
-                    # Log state before modification
-                    log_array_info(self.masks_layer.data, "Mask before deletion")
-
-                    new_mask = self.masks_layer.data.copy()
-                    new_mask[new_mask == cell_id] = 0
-                    self.masks_layer.data = new_mask
-
-                    # Log state after modification
-                    log_array_info(new_mask, "Mask after deletion")
-
-                    self.data_manager.segmentation_data = new_mask
-                    self.vis_manager.update_tracking_visualization(new_mask)
+                    self.data_manager.segmentation_data = new_frame
 
                 self.status_label.setText(f"Deleted cell {cell_id}")
-                logger.info(f"Successfully deleted cell {cell_id} in frame {current_slice}")
 
-            except Exception as e:
-                logger.error(f"Error deleting cell: {e}", exc_info=True)
-                raise
             finally:
                 self._updating = False
     def _on_mouse_wheel(self, viewer, event):
@@ -375,8 +351,12 @@ class CellCorrectionWidget(QWidget):
             try:
                 self._updating = True
                 current_slice = int(self.viewer.dims.point[0])
+                logger.debug(f"Mouse wheel event, current slice: {current_slice}")
 
                 if self.masks_layer is not None:
+                    logger.debug(f"Before update, masks layer data shape: {self.masks_layer.data.shape}")
+                    logger.debug(f"Unique values in masks layer data before update: {np.unique(self.masks_layer.data)}")
+
                     # Update just the current slice data while maintaining dimensionality
                     with self.viewer.events.blocker_all():
                         if self._full_masks.ndim == 3:
@@ -385,6 +365,9 @@ class CellCorrectionWidget(QWidget):
                             self.masks_layer.refresh()
                         else:
                             self.masks_layer.data = self._full_masks
+
+                    logger.debug(f"After update, masks layer data shape: {self.masks_layer.data.shape}")
+                    logger.debug(f"Unique values in masks layer data after update: {np.unique(self.masks_layer.data)}")
 
                     self._clear_drawing()
 

@@ -35,12 +35,27 @@ class VisualizationManager:
             self._updating = True
             logger.debug(f"Updating visualization with data type: {type(data)}")
 
+            # Log shape and unique values of input data
+            if isinstance(data, np.ndarray):
+                logger.debug(f"Input data shape: {data.shape}")
+                logger.debug(f"Unique values in input data: {np.unique(data)}")
+            elif isinstance(data, tuple):
+                logger.debug(f"Input frame data shape: {data[0].shape}")
+                logger.debug(f"Unique values in input frame data: {np.unique(data[0])}")
+                logger.debug(f"Input frame index: {data[1]}")
+
             # Handle input data
             if isinstance(data, tuple):
                 frame_data, frame_index = data
                 self._update_single_frame(frame_data, frame_index)
             else:
                 self._update_full_stack(data)
+
+            # Log final state of tracking layer data
+            if self.tracking_layer is not None:
+                logger.debug(f"Final tracking layer data shape: {self.tracking_layer.data.shape}")
+                logger.debug(f"Unique values in final tracking layer data: {np.unique(self.tracking_layer.data)}")
+
 
         except Exception as e:
             logger.error(f"Error updating visualization: {e}")
