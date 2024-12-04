@@ -15,13 +15,14 @@ class VisualizationManager:
         self.tracking_layer = None
         self.overlay_layer = None
         self._updating = False
+        self._current_dims = None  # Track current data dimensions
 
-    def update_tracking_visualization(self, tracked_data: Union[np.ndarray, Tuple[np.ndarray, int]], full_update: bool = False) -> None:
-        """Update the tracking visualization in napari viewer.
+    def update_tracking_visualization(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> None:
+        """
+        Update the tracking visualization with new data.
 
         Args:
-            tracked_data: Either full stack array or tuple of (single frame data, frame index)
-            full_update: Force update of entire stack
+            data: Either a full 3D stack (np.ndarray) or a tuple of (2D frame, frame_index)
         """
         if self._updating:
             return
@@ -29,50 +30,101 @@ class VisualizationManager:
         try:
             self._updating = True
 
-            # Handle different input types
-            if isinstance(tracked_data, tuple):
-                frame_data, frame_idx = tracked_data
-                if self.tracking_layer is None:
-                    raise ValueError("Layer must exist for single frame updates")
-
-                # Update single frame
-                with self.viewer.events.blocker_all():
-                    current_data = self.tracking_layer.data
-                    current_data[frame_idx] = frame_data
-                    # Use direct data assignment to avoid full refresh
-                    self.tracking_layer._data[frame_idx] = frame_data
-
-                logger.debug(f"Updated single frame {frame_idx}")
-
+            # Handle input data
+            if isinstance(data, tuple):
+                frame_data, frame_index = data
+                self._update_single_frame(frame_data, frame_index)
             else:
-                # Full stack update
-                tracked_data = np.asarray(tracked_data)
-                if tracked_data.ndim == 2:
-                    tracked_data = tracked_data[np.newaxis, ...]
-
-                with self.viewer.events.blocker_all():
-                    if self.tracking_layer is None:
-                        self.tracking_layer = self.viewer.add_labels(
-                            tracked_data,
-                            name='Cell Tracking',
-                            opacity=0.7,
-                            visible=True
-                        )
-                    else:
-                        self.tracking_layer.data = tracked_data
-
-                logger.debug(f"Updated full stack with shape {tracked_data.shape}")
-
-            # Only refresh the current view
-            if self.tracking_layer is not None:
-                current_step = int(self.viewer.dims.point[0])
-                self.tracking_layer.refresh()
+                self._update_full_stack(data)
 
         except Exception as e:
-            logger.error(f"Error updating tracking visualization: {e}")
+            logger.error(f"Error updating visualization: {e}")
             raise
         finally:
             self._updating = False
+            if self.tracking_layer is not None:
+                self.tracking_layer.refresh()
+
+    def _update_single_frame(self, frame_data: np.ndarray, frame_index: int) -> None:
+        """Update a single frame in the visualization."""
+        if frame_data.ndim != 2:
+            raise ValueError(f"Frame data must be 2D, got shape {frame_data.shape}")
+
+        # Initialize tracking layer if needed
+        if self.tracking_layer is None:
+            num_frames = int(self.viewer.dims.range[0][1] + 1)
+            empty_stack = np.zeros((num_frames, *frame_data.shape), dtype=frame_data.dtype)
+            empty_stack[frame_index] = frame_data
+            self.tracking_layer = self._create_tracking_layer(empty_stack)
+            self._current_dims = empty_stack.shape
+        else:
+            # Ensure dimensions match
+            if frame_data.shape != self.tracking_layer.data.shape[1:]:
+                raise ValueError(
+                    f"Frame shape {frame_data.shape} doesn't match existing data shape "
+                    f"{self.tracking_layer.data.shape[1:]}"
+                )
+
+            # Update single frame while preserving others
+            current_data = self.tracking_layer.data.copy()
+            current_data[frame_index] = frame_data
+            self.tracking_layer.data = current_data
+
+    def _update_full_stack(self, stack_data: np.ndarray) -> None:
+        """Update the visualization with a full stack of data."""
+        # Handle 2D data
+        if stack_data.ndim == 2:
+            stack_data = stack_data[np.newaxis, ...]
+
+        # Validate dimensions
+        if stack_data.ndim != 3:
+            raise ValueError(f"Stack data must be 3D, got shape {stack_data.shape}")
+
+        # Create or update tracking layer
+        if self.tracking_layer is None:
+            self.tracking_layer = self._create_tracking_layer(stack_data)
+            self._current_dims = stack_data.shape
+        else:
+            # Check if dimensions changed
+            if stack_data.shape != self.tracking_layer.data.shape:
+                logger.warning(
+                    f"Data dimensions changed from {self.tracking_layer.data.shape} "
+                    f"to {stack_data.shape}"
+                )
+                # Remove existing layer and create new one
+                self.clear_visualization()
+                self.tracking_layer = self._create_tracking_layer(stack_data)
+                self._current_dims = stack_data.shape
+            else:
+                # Update existing layer
+                self.tracking_layer.data = stack_data
+
+    def _create_tracking_layer(self, data: np.ndarray) -> "napari.layers.Labels":
+        """Create a new tracking layer with proper settings."""
+        layer = self.viewer.add_labels(
+            data,
+            name='Cell Tracking',
+            opacity=0.5,
+            visible=True
+        )
+
+        # Set up proper transforms
+        self._setup_layer_transforms(layer, data.shape)
+
+        return layer
+
+    def _setup_layer_transforms(self, layer: "napari.layers.Layer", data_shape: Tuple[int, ...]) -> None:
+        """Set up proper transforms for the layer based on data dimensions."""
+        ndim = len(data_shape)
+        scale = np.ones(ndim)
+        translate = np.zeros(ndim)
+
+        affine_matrix = np.eye(ndim + 1)
+        affine_matrix[:-1, :-1] = np.diag(scale)
+        affine_matrix[:-1, -1] = translate
+
+        transform = Affine(affine_matrix=affine_matrix)
+        layer.affine = transform
 
     def clear_visualization(self) -> None:
         """Remove all visualization layers."""
@@ -81,14 +133,18 @@ class VisualizationManager:
 
         try:
             self._updating = True
-            if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
-                self.viewer.layers.remove(self.tracking_layer)
+
+            if self.tracking_layer is not None:
+                if self.tracking_layer in self.viewer.layers:
+                    self.viewer.layers.remove(self.tracking_layer)
                 self.tracking_layer = None
 
-            if self.overlay_layer is not None and self.overlay_layer in self.viewer.layers:
-                self.viewer.layers.remove(self.overlay_layer)
+            if self.overlay_layer is not None:
+                if self.overlay_layer in self.viewer.layers:
+                    self.viewer.layers.remove(self.overlay_layer)
                 self.overlay_layer = None
 
+            self._current_dims = None
             logger.debug("Cleared all visualization layers")
 
         except Exception as e:
@@ -97,35 +153,20 @@ class VisualizationManager:
         finally:
             self._updating = False
 
-    def _setup_layer_transforms(self, layer: "napari.layers.Layer", data_shape: Tuple[int, ...]) -> None:
-        """Set up proper transforms for the layer based on data dimensions."""
-        # Create identity transform for each dimension
-        ndim = len(data_shape)
-        scale = np.ones(ndim)
-        translate = np.zeros(ndim)
+    def get_current_frame(self) -> Optional[np.ndarray]:
+        """Get the data for the current frame."""
+        if self.tracking_layer is None:
+            return None
 
-        # Create affine transform
-        affine_matrix = np.eye(ndim + 1)
-        affine_matrix[:-1, :-1] = np.diag(scale)
-        affine_matrix[:-1, -1] = translate
+        current_step = int(self.viewer.dims.point[0])
+        return self.tracking_layer.data[current_step]
 
-        transform = Affine(affine_matrix=affine_matrix)
-        layer.affine = transform
+    def set_layer_visibility(self, visible: bool) -> None:
+        """Set the visibility of the tracking layer."""
+        if self.tracking_layer is not None:
+            self.tracking_layer.visible = visible
 
-    def set_layer_visibility(self, layer_name: str, visible: bool) -> None:
-        """Set the visibility of a specific layer."""
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-            for layer in self.viewer.layers:
-                if layer.name == layer_name:
-                    layer.visible = visible
-                    logger.debug(f"Set {layer_name} visibility to {visible}")
-                    break
-        except Exception as e:
-            logger.error(f"Error setting layer visibility: {e}")
-            raise
-        finally:
-            self._updating = False
+    def cleanup(self) -> None:
+        """Clean up resources when closing."""
+        self.clear_visualization()
+        self.viewer = None

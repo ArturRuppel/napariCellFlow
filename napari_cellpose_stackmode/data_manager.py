@@ -1,6 +1,8 @@
 # data_manager.py
 import logging
 from pathlib import Path
+from typing import Optional
+
 import numpy as np
 import tifffile
 
@@ -8,13 +10,70 @@ logger = logging.getLogger(__name__)
 
 
 class DataManager:
-    """Minimal data manager for handling cell tracking data."""
+    """Manages data across different components of the application."""
 
     def __init__(self):
-        self.tracked_data = None
-        self.last_directory = None
-        self.batch_mode = False
+        self._updating = False
+        self._preprocessed_data = None
+        self._segmentation_data = None  # Add this
+        self._tracked_data = None
 
+    @property
+    def segmentation_data(self) -> Optional[np.ndarray]:
+        """Get the segmentation data"""
+        return self._segmentation_data
+
+    @segmentation_data.setter
+    def segmentation_data(self, data: Optional[np.ndarray]):
+        """Set the segmentation data"""
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+            if data is not None and not isinstance(data, np.ndarray):
+                raise ValueError("Segmentation data must be a numpy array")
+            self._segmentation_data = data
+        finally:
+            self._updating = False
+
+    @property
+    def preprocessed_data(self) -> Optional[np.ndarray]:
+        """Get the preprocessed data"""
+        return self._preprocessed_data
+
+    @preprocessed_data.setter
+    def preprocessed_data(self, data: Optional[np.ndarray]):
+        """Set the preprocessed data"""
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+            if data is not None and not isinstance(data, np.ndarray):
+                raise ValueError("Preprocessed data must be a numpy array")
+            self._preprocessed_data = data
+        finally:
+            self._updating = False
+
+    @property
+    def tracked_data(self) -> Optional[np.ndarray]:
+        """Get the tracked data"""
+        return self._tracked_data
+
+    @tracked_data.setter
+    def tracked_data(self, data: Optional[np.ndarray]):
+        """Set the tracked data"""
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+            if data is not None and not isinstance(data, np.ndarray):
+                raise ValueError("Tracked data must be a numpy array")
+            self._tracked_data = data
+        finally:
+            self._updating = False
     def save_tracking_results(self, path: Path) -> None:
         """Save tracking results to a TIFF file."""
         try:

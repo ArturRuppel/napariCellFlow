@@ -20,6 +20,8 @@ from .cell_correction_widget import CellCorrectionWidget
 from .segmentation import SegmentationHandler, SegmentationParameters
 from .data_manager import DataManager
 from .visualization_manager import VisualizationManager
+from .segmentation_state import SegmentationStateManager
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,22 +33,187 @@ class SegmentationWidget(QWidget):
     segmentation_completed = Signal(np.ndarray, dict)  # masks, metadata
     segmentation_failed = Signal(str)
 
-    def __init__(
-            self,
-            viewer: "napari.Viewer",
-            data_manager: DataManager,
-            visualization_manager: VisualizationManager
-    ):
+    def __init__(self, viewer: "napari.Viewer", data_manager: DataManager,
+                 visualization_manager: VisualizationManager):
         super().__init__()
         self.viewer = viewer
         self.data_manager = data_manager
         self.vis_manager = visualization_manager
+
+        # Add state manager
+        self.state_manager = SegmentationStateManager()
+        self.state_manager.register_callback(self._on_state_change)
 
         # Initialize segmentation handler
         self.segmentation = SegmentationHandler()
 
         self._setup_ui()
         self._connect_signals()
+
+    def _on_state_change(self, state):
+        """Handle state changes"""
+        # Update progress bar
+        if state.total_frames:
+            processed, total = state.get_processing_progress()
+            progress = int((processed / total) * 100)
+            self.progress_bar.setValue(progress)
+
+            # Update status message
+            if state.is_processing:
+                self.status_label.setText(f"Processing frame {processed}/{total}")
+            elif state.last_error:
+                self.status_label.setText(f"Error: {state.last_error}")
+            elif state.all_frames_processed():
+                self.status_label.setText("Processing complete")
+
+        # Update visualization based on state
+        if state.full_stack is not None:
+            if state.is_processing:
+                # During processing, update single frame
+                self.vis_manager.update_tracking_visualization(
+                    (state.get_frame(state.current_frame), state.current_frame)
+                )
+            else:
+                # After processing complete, update full stack
+                self.vis_manager.update_tracking_visualization(state.full_stack)
+
+        # Update UI states
+        self._update_button_states()
+
+    def _run_segmentation(self):
+        """Run segmentation on current frame"""
+        try:
+            if not self._ensure_model_initialized():
+                return
+
+            image_layer = self._get_active_image_layer()
+            if image_layer is None:
+                raise ValueError("No image layer selected")
+
+            data = image_layer.data
+            current_frame = int(self.viewer.dims.point[0])
+
+            # Initialize state if needed, preserving existing data
+            if self.state_manager.state.full_stack is None:
+                if data.ndim == 2:
+                    self.state_manager.initialize_processing((1, *data.shape))
+                else:
+                    self.state_manager.initialize_processing(data.shape)
+            else:
+                # If we already have a stack, preserve it
+                preserved_stack = self.state_manager.state.full_stack.copy()
+                self.state_manager.initialize_processing(preserved_stack.shape)
+                self.state_manager.state.full_stack = preserved_stack
+
+            # Get current frame data
+            frame_data = data[current_frame] if data.ndim > 2 else data
+
+            # Start processing
+            self.state_manager.start_processing()
+
+            # Run segmentation
+            masks, metadata = self.segmentation.segment_frame(frame_data)
+
+            # Update only the current frame in the state while preserving others
+            self.state_manager.update_frame_result(current_frame, masks, metadata)
+
+            # Finish processing
+            self.state_manager.finish_processing()
+
+            # Make sure visualization is updated
+            if data.ndim > 2:
+                self.vis_manager.update_tracking_visualization(
+                    (self.state_manager.state.full_stack[current_frame], current_frame)
+                )
+            else:
+                self.vis_manager.update_tracking_visualization(
+                    self.state_manager.state.full_stack
+                )
+
+        except Exception as e:
+            self._on_segmentation_failed(str(e))
+    def _run_stack_segmentation(self):
+        """Run segmentation on entire stack"""
+        try:
+            image_layer = self._get_active_image_layer()
+            if image_layer is None:
+                raise ValueError("No image layer selected")
+
+            if image_layer.data.ndim < 3:
+                raise ValueError("Selected layer is not a stack")
+
+            # Initialize state for stack
+            self.state_manager.initialize_processing(image_layer.data.shape)
+
+            # Start processing
+            self.state_manager.start_processing()
+
+            total_frames = image_layer.data.shape[0]
+
+            # Create progress dialog
+            progress = QProgressDialog("Processing image stack...", "Cancel", 0, total_frames, self)
+            progress.setWindowModality(Qt.WindowModal)
+
+            try:
+                for i in range(total_frames):
+                    if progress.wasCanceled():
+                        raise InterruptedError("Processing canceled by user")
+
+                    # Update progress
+                    progress.setValue(i)
+
+                    # Process frame
+                    frame = image_layer.data[i]
+                    masks, metadata = self.segmentation.segment_frame(frame)
+
+                    # Update state
+                    self.state_manager.update_frame_result(i, masks, metadata)
+
+            finally:
+                progress.close()
+                self.state_manager.finish_processing()
+
+        except InterruptedError as e:
+            logger.info(f"Stack processing interrupted: {str(e)}")
+            QMessageBox.information(self, "Processing Canceled", "Stack processing was canceled")
+
+        except Exception as e:
+            self._on_segmentation_failed(str(e))
+
+    def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
+        """Handle completion of segmentation"""
+        try:
+            # Get final results from state manager
+            final_masks, metadata = self.state_manager.get_results()
+
+            # Update data manager
+            self.data_manager.segmentation_data = final_masks
+
+            # Enable buttons and update status
+            self.save_btn.setEnabled(True)
+            self.export_btn.setEnabled(True)
+
+            # Emit completion signal
+            self.segmentation_completed.emit(final_masks, metadata)
+
+        except Exception as e:
+            self._on_segmentation_failed(str(e))
+
+    def _update_button_states(self):
+        """Update button states based on current state"""
+        state = self.state_manager.state
+
+        # Disable buttons during processing
+        processing_buttons = [self.run_btn, self.run_stack_btn, self.save_btn,
+                              self.export_btn, self.import_btn]
+
+        for button in processing_buttons:
+            button.setEnabled(not state.is_processing)
+
+        # Enable/disable based on data availability
+        has_data = state.full_stack is not None
+        self.save_btn.setEnabled(has_data and not state.is_processing)
+        self.export_btn.setEnabled(has_data and not state.is_processing)
 
     def _connect_signals(self):
         """Connect signals between components"""
@@ -73,26 +240,6 @@ class SegmentationWidget(QWidget):
         self.viewer.layers.events.inserted.connect(self._update_button_states)
         self.viewer.layers.events.removed.connect(self._update_button_states)
 
-    def _update_button_states(self, event=None):
-        """Update button states based on current conditions"""
-        has_image = self._get_active_image_layer() is not None
-        has_segmentation = (hasattr(self.data_manager, 'segmentation_data') and
-                            self.data_manager.segmentation_data is not None)
-
-        # Update main operation buttons
-        self.run_btn.setEnabled(has_image)
-        self.run_stack_btn.setEnabled(
-            has_image and
-            isinstance(self._get_active_image_layer().data, np.ndarray) and
-            self._get_active_image_layer().data.ndim > 2
-        )
-
-        # Update export-related buttons
-        self.export_btn.setEnabled(has_segmentation)
-        self.launch_gui_btn.setEnabled(True)  # Always enabled as it's independent
-        self.import_btn.setEnabled(has_segmentation)
-        self.save_btn.setEnabled(has_segmentation)
-
     def shutdown(self):
         """Clean up resources"""
         try:
@@ -118,35 +265,6 @@ class SegmentationWidget(QWidget):
         self.status_label.setText(message)
         logger.debug(f"Progress: {progress}%, Message: {message}")
 
-    def _run_segmentation(self):
-        """Run segmentation on current frame"""
-        try:
-            if not self._ensure_model_initialized():
-                return
-
-            image_layer = self._get_active_image_layer()
-            if image_layer is None:
-                raise ValueError("No image layer selected")
-
-            # Disable controls during processing
-            self._set_controls_enabled(False)
-            self.progress_bar.setValue(0)
-            self.status_label.setText("Starting segmentation...")
-
-            # Get current frame data
-            data = image_layer.data
-            if data.ndim > 2:
-                current_step = self.viewer.dims.point[0]
-                data = data[int(current_step)]
-
-            # Run segmentation
-            self.segmentation.segment_frame(data)
-
-        except Exception as e:
-            self._on_segmentation_failed(str(e))
-        finally:
-            self._set_controls_enabled(True)
-
     def _set_controls_enabled(self, enabled: bool):
         """Enable or disable all controls"""
         controls = [
@@ -164,35 +282,6 @@ class SegmentationWidget(QWidget):
         for control in controls:
             control.setEnabled(enabled)
 
-    def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
-        """Handle successful segmentation"""
-        try:
-            # Update data manager
-            self.data_manager.segmentation_data = masks
-
-            # Update visualization
-            self.vis_manager.update_tracking_visualization(masks)
-
-            # Add these new lines:
-            self.correction_widget.set_masks_layer(masks)
-            self.correction_widget.correction_made.connect(self._on_correction_made)
-
-            # Enable buttons
-            self.save_btn.setEnabled(True)
-            self.export_btn.setEnabled(True)
-
-            # Update status
-            num_cells = len(np.unique(masks)) - 1
-            self.status_label.setText(f"Segmentation complete. Found {num_cells} cells")
-            self.progress_bar.setValue(100)
-
-            # Signal completion
-            self.segmentation_completed.emit(masks, results)
-
-        except Exception as e:
-            self._on_segmentation_failed(str(e))
-
-        # Add this new method:
     def _on_correction_made(self, updated_masks: np.ndarray):
         """Handle corrections made to the segmentation"""
         try:
@@ -202,6 +291,7 @@ class SegmentationWidget(QWidget):
             self.status_label.setText(f"Correction applied. Current cell count: {num_cells}")
         except Exception as e:
             self._on_segmentation_failed(f"Error applying correction: {str(e)}")
+
     def _on_segmentation_failed(self, error_msg: str):
         """Handle segmentation failure"""
         logger.error(f"Segmentation failed: {error_msg}")
@@ -365,6 +455,7 @@ class SegmentationWidget(QWidget):
 
         # Add stretch at the bottom
         layout.addStretch()
+
     def _on_model_changed(self, model_type: str):
         """Handle model type change"""
         self.custom_model_btn.setEnabled(model_type == "custom")
@@ -375,6 +466,7 @@ class SegmentationWidget(QWidget):
                 self._initialize_model()
             except Exception as e:
                 logger.error(f"Failed to initialize model on type change: {str(e)}")
+
     def _load_custom_model(self):
         """Open file dialog to select custom model"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -431,80 +523,6 @@ class SegmentationWidget(QWidget):
             logger.error(error_msg)
             QMessageBox.critical(self, "Error", error_msg)
 
-    def _run_stack_segmentation(self):
-        """Run segmentation on entire stack with progress tracking"""
-        try:
-            image_layer = self._get_active_image_layer()
-            if image_layer is None:
-                raise ValueError("No image layer selected")
-
-            if image_layer.data.ndim < 3:
-                raise ValueError("Selected layer is not a stack")
-
-            # Initialize model if needed
-            if self.segmentation.model is None:
-                self._initialize_model()
-
-            # Process each frame
-            masks_list = []
-            total_frames = image_layer.data.shape[0]
-
-            # Create progress dialog
-            from qtpy.QtWidgets import QProgressDialog
-            from qtpy.QtCore import Qt
-            progress = QProgressDialog("Processing image stack...", "Cancel", 0, total_frames, self)
-            progress.setWindowModality(Qt.WindowModal)
-
-            try:
-                for i in range(total_frames):
-                    if progress.wasCanceled():
-                        raise InterruptedError("Processing canceled by user")
-
-                    # Update progress
-                    progress.setValue(i)
-                    progress.setLabelText(f"Processing frame {i + 1}/{total_frames}")
-
-                    # Extract single frame and ensure proper dimensions
-                    frame = image_layer.data[i]
-                    if frame.ndim > 2:
-                        frame = frame.squeeze()
-                    if frame.ndim != 2:
-                        raise ValueError(f"Invalid frame dimensions: {frame.shape}")
-
-                    # Run segmentation on frame
-                    try:
-                        masks, results = self.segmentation.segment_frame(frame)
-                        masks_list.append(masks)
-                        logger.debug(f"Processed frame {i + 1}/{total_frames}, found {len(np.unique(masks)) - 1} cells")
-                    except Exception as e:
-                        raise ValueError(f"Failed to segment frame {i}: {str(e)}")
-
-                # Stack all masks together
-                masks_stack = np.stack(masks_list)
-
-                # Store final results with all frames
-                final_results = {
-                    'masks': masks_stack,
-                    'parameters': self.segmentation.params.__dict__,
-                    'total_frames': total_frames
-                }
-
-                # Update visualization and emit completion signal
-                self._on_segmentation_completed(masks_stack, final_results)
-
-            finally:
-                # Ensure progress dialog is closed
-                progress.close()
-
-        except InterruptedError as e:
-            logger.info(f"Stack processing interrupted: {str(e)}")
-            QMessageBox.information(self, "Processing Canceled", "Stack processing was canceled")
-
-        except Exception as e:
-            error_msg = f"Stack processing failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            QMessageBox.critical(self, "Error", error_msg)
-            self._on_segmentation_failed(error_msg)
     def _save_results(self):
         """Save segmentation results"""
         try:
