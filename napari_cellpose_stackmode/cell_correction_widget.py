@@ -5,6 +5,7 @@ import napari
 from napari.layers import Labels
 import logging
 import cv2
+
 logger = logging.getLogger(__name__)
 
 
@@ -12,6 +13,9 @@ class CellCorrectionWidget(QWidget):
     """Widget for interactive cell correction in napari."""
 
     correction_made = Signal(np.ndarray)  # Emitted when masks are modified
+    LINE_THICKNESS = 3
+    START_POINT_RADIUS = 5
+    LINE_COLOR = 2
 
     def __init__(self, viewer: "napari.Viewer", parent: QWidget = None):
         super().__init__(parent)
@@ -25,15 +29,205 @@ class CellCorrectionWidget(QWidget):
         self.selected_cell = None
         self.drawing_started = False
         self.start_point = None
-        self.CLOSURE_THRESHOLD = 10  # pixels
+        self.CLOSURE_THRESHOLD = 10
         self.MIN_DRAWING_POINTS = 5
         self.ctrl_pressed = False
         self.toggle_state = False
+        self._updating = False  # Flag to prevent recursive updates
 
-        # Rest of initialization remains the same
         self._setup_ui()
         self._connect_events()
         QApplication.instance().installEventFilter(self)
+
+    def set_masks_layer(self, masks: np.ndarray):
+        """Set or update the masks layer."""
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+
+            # Ensure proper dimensions for editing
+            if masks.ndim == 3:
+                self._full_masks = masks.copy()  # Store a copy to prevent reference issues
+                current_slice = int(self.viewer.dims.point[0])
+                display_masks = self._full_masks[current_slice].copy()
+            else:
+                self._full_masks = None
+                display_masks = masks.copy()
+
+            if self.masks_layer is None:
+                self.masks_layer = self.viewer.add_labels(
+                    display_masks,
+                    name='Cell Masks',
+                    opacity=0.5
+                )
+            else:
+                self.masks_layer.data = display_masks
+
+            self.next_cell_id = masks.max() + 1
+
+        except Exception as e:
+            logger.error(f"Error setting masks layer: {e}")
+            raise
+        finally:
+            self._updating = False
+
+    def _on_correction_made(self, updated_masks: np.ndarray):
+        """Handle corrections to prevent update loops."""
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+            if hasattr(self, '_full_masks') and self._full_masks is not None:
+                current_slice = int(self.viewer.dims.point[0])
+                self._full_masks[current_slice] = updated_masks
+                self.masks_layer.data = updated_masks
+                self.correction_made.emit(self._full_masks)
+            else:
+                self.masks_layer.data = updated_masks
+                self.correction_made.emit(updated_masks)
+        finally:
+            self._updating = False
+
+    def _delete_cell_at_position(self, coords):
+        """Delete cell at the given coordinates."""
+        if self._updating or not self._validate_coords(coords):
+            return
+
+        current_mask = self._get_current_frame_mask()
+        if current_mask is None:
+            return
+
+        cell_id = current_mask[coords[0], coords[1]]
+        if cell_id > 0:
+            try:
+                self._updating = True
+                if hasattr(self, '_full_masks') and self._full_masks is not None:
+                    current_slice = int(self.viewer.dims.point[0])
+                    new_mask = self._full_masks[current_slice].copy()
+                    new_mask[new_mask == cell_id] = 0
+                    self._full_masks[current_slice] = new_mask
+                    self.masks_layer.data = new_mask
+                    self.correction_made.emit(self._full_masks)
+                else:
+                    new_mask = self.masks_layer.data.copy()
+                    new_mask[new_mask == cell_id] = 0
+                    self.masks_layer.data = new_mask
+                    self.correction_made.emit(new_mask)
+
+                self.status_label.setText(f"Deleted cell {cell_id}")
+                logger.info(f"Deleted cell {cell_id}")
+
+            except Exception as e:
+                logger.error(f"Error deleting cell: {e}")
+                raise
+            finally:
+                self._updating = False
+
+    def _on_mouse_wheel(self, viewer, event):
+        """Handle mouse wheel events to update current frame."""
+        if self._updating:
+            return
+
+        if hasattr(self, '_full_masks') and self._full_masks is not None:
+            try:
+                self._updating = True
+                current_slice = int(self.viewer.dims.point[0])
+                if self.masks_layer is not None:
+                    self.masks_layer.data = self._full_masks[current_slice].copy()
+                    self._clear_drawing()
+            finally:
+                self._updating = False
+
+    def _update_drawing_preview(self):
+        """Update the preview of the cell being drawn."""
+        if not self.drawing_points or len(self.drawing_points) < 2:
+            return
+
+        if self.drawing_layer is None:
+            empty_data = np.zeros_like(self.masks_layer.data)
+            self.drawing_layer = self.viewer.add_labels(
+                empty_data,
+                name='Drawing Preview',
+                opacity=0.8  # Increased opacity for better visibility
+            )
+
+        mask = self._create_empty_mask()
+        if mask is None:
+            return
+
+        # Draw the path with thicker lines
+        points = np.array(self.drawing_points)
+        for i in range(len(points) - 1):
+            cv2.line(mask,
+                     (points[i][1], points[i][0]),
+                     (points[i + 1][1], points[i + 1][0]),
+                     self.LINE_COLOR,
+                     self.LINE_THICKNESS)
+
+        # Draw start point circle
+        if self.start_point is not None:
+            cv2.circle(mask,
+                      (self.start_point[1], self.start_point[0]),
+                      self.START_POINT_RADIUS,
+                      self.LINE_COLOR,
+                      -1)  # Filled circle
+
+        if len(self.masks_layer.data.shape) == 3:
+            current_frame = int(self.viewer.dims.point[0])
+            new_data = self.drawing_layer.data.copy()
+            new_data[current_frame] = mask
+            self.drawing_layer.data = new_data
+        else:
+            self.drawing_layer.data = mask
+
+    def _on_mouse_drag(self, viewer, event):
+        if self.masks_layer is None:
+            return
+
+        pos = self.viewer.cursor.position
+        coords = np.round(pos).astype(int)[-2:]  # Take last 2 dimensions for y,x
+
+        if event.button == Qt.RightButton:
+            if self.is_drawing:
+                if not self.drawing_started:
+                    self.drawing_started = True
+                    self.start_point = coords
+                    self.drawing_points = [coords]
+                    self._update_drawing_preview()
+            else:
+                self._handle_selection(coords)
+        elif event.button == Qt.LeftButton and self.is_drawing:
+            # Add ability to delete cells with left click in drawing mode
+            self._delete_cell_at_position(coords)
+
+    def _setup_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # Status label
+        self.status_label = QLabel("Ready")
+        layout.addWidget(self.status_label)
+
+        # Control buttons
+        self.toggle_draw_btn = QPushButton("Toggle Drawing Mode (or hold Ctrl)")
+        self.toggle_draw_btn.setCheckable(True)
+        layout.addWidget(self.toggle_draw_btn)
+
+        # Updated instructions
+        instructions = QLabel(
+            "Drawing Mode:\n"
+            "- Hold Ctrl + Right click and drag to draw cell boundary\n"
+            "- Return to start point (marked with circle) to complete the cell\n"
+            "- Left click to delete cells\n\n"
+            "Selection Mode:\n"
+            "- Right-click: Select cell\n"
+            "- Delete: Remove selected cell"
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
 
     def _get_current_frame_mask(self):
         """Get mask for the current frame."""
@@ -60,45 +254,6 @@ class CellCorrectionWidget(QWidget):
         else:
             # For 2D data
             return np.zeros_like(self.masks_layer.data)
-
-    def _update_drawing_preview(self):
-        """Update the preview of the cell being drawn."""
-        if not self.drawing_points or len(self.drawing_points) < 2:
-            return
-
-        if self.drawing_layer is None:
-            # Create initial drawing layer
-            empty_data = np.zeros_like(self.masks_layer.data)
-            self.drawing_layer = self.viewer.add_labels(
-                empty_data,
-                name='Drawing Preview',
-                opacity=0.6
-            )
-
-        # Create mask for current frame
-        mask = self._create_empty_mask()
-        if mask is None:
-            return
-
-        # Draw the current path
-        points = np.array(self.drawing_points)
-        for i in range(len(points) - 1):
-            cv2.line(mask,
-                     (points[i][1], points[i][0]),  # OpenCV uses (x,y) order
-                     (points[i + 1][1], points[i + 1][0]),
-                     1,
-                     1)
-
-        # Update the drawing layer
-        if len(self.masks_layer.data.shape) == 3:
-            # For 3D data, update only current frame
-            current_frame = int(self.viewer.dims.point[0])
-            new_data = self.drawing_layer.data.copy()
-            new_data[current_frame] = mask
-            self.drawing_layer.data = new_data
-        else:
-            # For 2D data
-            self.drawing_layer.data = mask
 
     def _finish_drawing(self):
         """Complete the cell drawing process."""
@@ -226,33 +381,6 @@ class CellCorrectionWidget(QWidget):
                 return False  # Don't consume the event
         return super().eventFilter(watched_object, event)
 
-    def _setup_ui(self):
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-
-        # Status label
-        self.status_label = QLabel("Ready")
-        layout.addWidget(self.status_label)
-
-        # Control buttons
-        self.toggle_draw_btn = QPushButton("Toggle Drawing Mode (or hold Ctrl)")
-        self.toggle_draw_btn.setCheckable(True)
-        layout.addWidget(self.toggle_draw_btn)
-
-        # Instructions
-        instructions = QLabel(
-            "Drawing Mode:\n"
-            "- Hold Ctrl + Right click and drag to draw cell boundary\n"
-            "- Return to start point to complete the cell\n\n"
-            "Selection Mode:\n"
-            "- Right-click: Select cell\n"
-            "- Delete: Remove selected cell"
-        )
-        layout.addWidget(instructions)
-
-        # Ensure the widget accepts focus
-        self.setFocusPolicy(Qt.StrongFocus)
-
     def _connect_events(self):
         # Mouse events
         self.viewer.mouse_drag_callbacks.append(self._on_mouse_drag)
@@ -312,25 +440,6 @@ class CellCorrectionWidget(QWidget):
         self.toggle_draw_btn.setChecked(self.is_drawing)
         self.toggle_draw_btn.blockSignals(False)
 
-    def _on_mouse_drag(self, viewer, event):
-        if self.masks_layer is None:
-            return
-
-        pos = self.viewer.cursor.position
-        coords = np.round(pos).astype(int)[-2:]  # Take last 2 dimensions for y,x
-
-        if event.button == Qt.RightButton:
-            if self.is_drawing:
-                if not self.drawing_started:
-                    # Start drawing
-                    self.drawing_started = True
-                    self.start_point = coords
-                    self.drawing_points = [coords]
-                    self._update_drawing_preview()
-            else:
-                # Selection mode
-                self._handle_selection(coords)
-
     def _on_mouse_move(self, viewer, event):
         """Handle mouse movement for drawing preview."""
         if not self.is_drawing or not self.drawing_started:
@@ -353,14 +462,6 @@ class CellCorrectionWidget(QWidget):
 
                 self._update_drawing_preview()
 
-    def _on_mouse_wheel(self, viewer, event):
-        """Handle mouse wheel events to update current frame."""
-        if hasattr(self, '_full_masks') and self._full_masks is not None:
-            current_slice = int(self.viewer.dims.point[0])
-            if self.masks_layer is not None:
-                self.masks_layer.data = self._full_masks[current_slice]
-                self._clear_drawing()  # Clear any in-progress drawing
-
 
     def _validate_coords(self, coords):
         """Validate coordinates are within image bounds."""
@@ -380,33 +481,6 @@ class CellCorrectionWidget(QWidget):
                 pass  # Layer already removed
             self.drawing_layer = None
 
-    def set_masks_layer(self, masks: np.ndarray):
-        """Set or update the masks layer."""
-        try:
-            # Ensure proper dimensions for editing
-            if masks.ndim == 3:
-                # Store the full 3D stack but only show current slice for editing
-                self._full_masks = masks
-                current_slice = self.viewer.dims.point[0]
-                display_masks = masks[int(current_slice)]
-            else:
-                self._full_masks = None
-                display_masks = masks
-
-            if self.masks_layer is None:
-                self.masks_layer = self.viewer.add_labels(
-                    display_masks,
-                    name='Cell Masks',
-                    opacity=0.5
-                )
-            else:
-                self.masks_layer.data = display_masks
-
-            self.next_cell_id = masks.max() + 1
-
-        except Exception as e:
-            logger.error(f"Error setting masks layer: {e}")
-            raise
     def _handle_key_press(self, event):
         """Handle key press events."""
         if event.key() == Qt.Key_Control:
