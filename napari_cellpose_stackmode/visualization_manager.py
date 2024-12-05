@@ -73,7 +73,6 @@ class VisualizationManager:
             raise ValueError(f"Frame data must be 2D, got shape {frame_data.shape}")
         logger.debug(f"Updating frame {frame_index}")
 
-        # Initialize tracking layer if needed
         if self.tracking_layer is None:
             num_frames = int(self.viewer.dims.range[0][1] + 1)
             empty_stack = np.zeros((num_frames, *frame_data.shape), dtype=frame_data.dtype)
@@ -81,16 +80,17 @@ class VisualizationManager:
             self.tracking_layer = self._create_tracking_layer(empty_stack)
             self._current_dims = empty_stack.shape
         else:
-            # Ensure dimensions match
-            if frame_data.shape != self.tracking_layer.data.shape[1:]:
+            # Create a copy of current data to modify
+            current_data = self.tracking_layer.data.copy()
+            if frame_data.shape != current_data.shape[1:]:
                 raise ValueError(
                     f"Frame shape {frame_data.shape} doesn't match existing data shape "
-                    f"{self.tracking_layer.data.shape[1:]}"
+                    f"{current_data.shape[1:]}"
                 )
 
-            # Update single frame while preserving others
-            current_data = self.tracking_layer.data.copy()
+            # Update only the specified frame
             current_data[frame_index] = frame_data
+            # Update the layer with the modified data
             self.tracking_layer.data = current_data
 
     @log_visualization_ops

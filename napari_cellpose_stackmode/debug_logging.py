@@ -43,7 +43,7 @@ def log_state_changes(func: Callable) -> Callable:
             logger.debug(f"Entering {func.__name__}")
         else:
             logger.debug(f"Entering {func.__name__}")
-            logger.debug(f"  Args: {args}")
+            # logger.debug(f"  Args: {args}")
             logger.debug(f"  Kwargs: {kwargs}")
 
 

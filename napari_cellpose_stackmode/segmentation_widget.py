@@ -95,17 +95,23 @@ class SegmentationWidget(QWidget):
                 raise ValueError("No image layer selected")
 
             current_frame = int(self.viewer.dims.point[0])
+            num_frames = image_layer.data.shape[0] if image_layer.data.ndim > 2 else 1
+
+            # Initialize DataManager if needed
+            if not hasattr(self.data_manager, '_num_frames'):
+                self.data_manager.initialize_stack(num_frames)
+
             logger.debug(f"Running segmentation on frame {current_frame}")
 
             data = image_layer.data
 
-            # Initialize state if needed, preserving existing data
+            # Initialize state if needed
             if self.state_manager.state.full_stack is None:
+                # Initialize with proper 3D shape
                 if data.ndim == 2:
                     self.state_manager.initialize_processing((1, *data.shape))
                 else:
                     self.state_manager.initialize_processing(data.shape)
-
 
             # Get current frame data
             frame_data = data[current_frame] if data.ndim > 2 else data
@@ -113,24 +119,28 @@ class SegmentationWidget(QWidget):
             # Start processing
             self.state_manager.start_processing()
 
-            # Run segmentation
+            # Run segmentation on current frame
             masks, metadata = self.segmentation.segment_frame(frame_data)
 
-            # Update only the current frame in the state while preserving others
-            self.state_manager.update_frame_result(current_frame, masks, metadata)
+            # Update only the current frame while preserving other frames
+            if self.data_manager.segmentation_data is not None:
+                self.data_manager.segmentation_data = masks, current_frame
+            else:
+                # First time - initialize with proper shape
+                if data.ndim > 2:
+                    full_stack = np.zeros(data.shape, dtype=np.uint16)
+                    full_stack[current_frame] = masks
+                    self.data_manager.segmentation_data = full_stack
+                else:
+                    self.data_manager.segmentation_data = masks[np.newaxis, ...]
 
             # Finish processing
             self.state_manager.finish_processing()
 
-            # Make sure visualization is updated
-            if data.ndim > 2:
-                self.vis_manager.update_tracking_visualization(
-                    (self.state_manager.state.full_stack[current_frame], current_frame)
-                )
-            else:
-                self.vis_manager.update_tracking_visualization(
-                    self.state_manager.state.full_stack
-                )
+            # Make sure visualization is updated for current frame only
+            self.vis_manager.update_tracking_visualization(
+                (masks, current_frame)
+            )
 
         except Exception as e:
             self._on_segmentation_failed(str(e))
@@ -187,17 +197,17 @@ class SegmentationWidget(QWidget):
         """Handle completion of segmentation"""
         try:
             logger.debug("Processing segmentation completion")
-            final_masks, metadata = self.state_manager.get_results()
+            current_frame = int(self.viewer.dims.point[0])
 
-            # Update data manager
-            self.data_manager.segmentation_data = final_masks
+            # Update data manager with current frame
+            self.data_manager.segmentation_data = (masks, current_frame)
 
             # Enable buttons and update status
             self.save_btn.setEnabled(True)
             self.export_btn.setEnabled(True)
 
             # Emit completion signal
-            self.segmentation_completed.emit(final_masks, metadata)
+            self.segmentation_completed.emit(masks, results)
 
         except Exception as e:
             self._on_segmentation_failed(str(e))

@@ -303,7 +303,6 @@ class CellCorrectionWidget(QWidget):
             self._updating = False
             self._clear_drawing()
 
-    @log_state_changes
     def _delete_cell_at_position(self, coords):
         """Delete cell at the given coordinates."""
         if self._updating or not self._validate_coords(coords):
@@ -315,39 +314,26 @@ class CellCorrectionWidget(QWidget):
             logger.debug("Deletion skipped - no current mask")
             return
 
-        logger.debug(f"Before deletion - current_mask shape: {current_mask.shape}")
-        logger.debug(f"Before deletion - unique values in current_mask: {np.unique(current_mask)}")
-
         cell_id = current_mask[coords[0], coords[1]]
         if cell_id > 0:
             try:
                 self._store_undo_state(f"Delete cell {cell_id}")
                 self._updating = True
-                current_slice = int(self.viewer.dims.point[0])
 
                 # Create a copy of just the current frame
                 new_frame = current_mask.copy()
                 new_frame[new_frame == cell_id] = 0
 
-                logger.debug(f"After deletion - new_frame shape: {new_frame.shape}")
-                logger.debug(f"After deletion - unique values in new_frame: {np.unique(new_frame)}")
+                # Get current frame index
+                current_slice = int(self.viewer.dims.point[0])
 
-                # Update only the current frame in the full stack
-                if hasattr(self, '_full_masks') and self._full_masks is not None:
-                    self._full_masks[current_slice] = new_frame
+                # Update only the current frame in data manager
+                self.data_manager.segmentation_data = (new_frame, current_slice)
 
                 # Update visualization for single frame
                 self.vis_manager.update_tracking_visualization(
                     (new_frame, current_slice)
                 )
-
-                # Update data manager
-                if hasattr(self, '_full_masks'):
-                    self.data_manager.segmentation_data = self._full_masks
-                else:
-                    self.data_manager.segmentation_data = new_frame
-
-                self.status_label.setText(f"Deleted cell {cell_id}")
 
             finally:
                 self._updating = False
