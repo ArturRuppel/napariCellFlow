@@ -24,15 +24,12 @@ from .segmentation_state import SegmentationStateManager
 from .debug_logging import log_state_changes, log_array_info, logger
 
 
-logger = logging.getLogger(__name__)
-
-
 class SegmentationWidget(QWidget):
-    """Widget for controlling cell segmentation in napari"""
+    """Widget for controlling cell segmentation in napari with enhanced frame handling"""
 
-    # Define signals for communication with main widget
     segmentation_completed = Signal(np.ndarray, dict)  # masks, metadata
     segmentation_failed = Signal(str)
+    progress_updated = Signal(int, str)  # progress percentage, message
 
     def __init__(self, viewer: "napari.Viewer", data_manager: DataManager,
                  visualization_manager: VisualizationManager):
@@ -41,106 +38,97 @@ class SegmentationWidget(QWidget):
         self.data_manager = data_manager
         self.vis_manager = visualization_manager
 
-        # Add state manager
-        self.state_manager = SegmentationStateManager()
-        self.state_manager.register_callback(self._on_state_change)
+        # Track processing state
+        self._current_frame = 0
+        self._processing = False
+        self._batch_processing = False
+        self._last_error = None
 
-        # Initialize segmentation handler
+        # Initialize handlers
+        self.state_manager = SegmentationStateManager()
         self.segmentation = SegmentationHandler()
 
         self._setup_ui()
         self._connect_signals()
-
-    def _on_state_change(self, state):
-        """Handle state changes"""
-        # Update progress bar
-        if state.total_frames:
-            processed, total = state.get_processing_progress()
-            progress = int((processed / total) * 100)
-            self.progress_bar.setValue(progress)
-
-            # Update status message
-            if state.is_processing:
-                self.status_label.setText(f"Processing frame {processed}/{total}")
-            elif state.last_error:
-                self.status_label.setText(f"Error: {state.last_error}")
-            elif state.all_frames_processed():
-                self.status_label.setText("Processing complete")
-
-        # Update visualization based on state
-        if state.full_stack is not None:
-            if state.is_processing:
-                # During processing, update single frame
-                self.vis_manager.update_tracking_visualization(
-                    (state.get_frame(state.current_frame), state.current_frame)
-                )
-            else:
-                # After processing complete, update full stack
-                self.vis_manager.update_tracking_visualization(state.full_stack)
-
-        # Update UI states
-        self._update_button_states()
-
+        self._update_ui_state()
 
     @log_state_changes
-    def _run_segmentation(self, preserve_existing=False):
-        """Run segmentation on current frame"""
+    def _run_segmentation(self, preserve_existing=False):  # Add the parameter here
+        """Run segmentation on current frame with enhanced error handling and state management."""
+        if self._processing:
+            logger.warning("Segmentation already in progress")
+            return
+
         try:
+            self._processing = True
+            self._update_ui_state()
+
+            # Validate prerequisites
             if not self._ensure_model_initialized():
-                logger.debug("Segmentation cancelled - model not initialized")
                 return
 
             image_layer = self._get_active_image_layer()
             if image_layer is None:
-                logger.debug("Segmentation cancelled - no image layer")
                 raise ValueError("No image layer selected")
 
-            # Get number of frames and initialize if needed
+            # Get frame information
+            self._current_frame = int(self.viewer.dims.point[0])
             num_frames = image_layer.data.shape[0] if image_layer.data.ndim > 2 else 1
-            current_frame = int(self.viewer.dims.point[0])
 
-            # Initialize DataManager if needed
-            if self.data_manager._segmentation_data is None:
+            # Initialize data manager if needed
+            if not self.data_manager._initialized:
                 logger.debug(f"Initializing data manager with {num_frames} frames")
                 self.data_manager.initialize_stack(num_frames)
 
-            logger.debug(f"Running segmentation on frame {current_frame}")
-
-            data = image_layer.data
-
-            # Initialize state if needed
-            if self.state_manager.state.full_stack is None:
-                # Initialize with proper 3D shape
-                if data.ndim == 2:
-                    self.state_manager.initialize_processing((1, *data.shape))
-                else:
-                    self.state_manager.initialize_processing(data.shape)
-
             # Get current frame data
-            frame_data = data[current_frame] if data.ndim > 2 else data
+            frame_data = (image_layer.data[self._current_frame]
+                          if image_layer.data.ndim > 2 else image_layer.data)
 
-            # Start processing
-            self.state_manager.start_processing()
+            # Update progress
+            self.progress_bar.setValue(0)
+            self.status_label.setText(f"Processing frame {self._current_frame + 1}/{num_frames}")
 
-            # Run segmentation on current frame
-            masks, metadata = self.segmentation.segment_frame(frame_data)
+            # Run segmentation
+            try:
+                masks, metadata = self.segmentation.segment_frame(frame_data)
 
-            # Update only the current frame while preserving other frames
-            self.data_manager.segmentation_data = (masks, current_frame)
+                # Update data manager with frame results
+                self.data_manager.segmentation_data = (masks, self._current_frame)
 
-            # Finish processing
-            self.state_manager.finish_processing()
+                # Update visualization for current frame
+                self.vis_manager.update_tracking_visualization(
+                    (masks, self._current_frame)
+                )
 
-            # Make sure visualization is updated for current frame only
-            self.vis_manager.update_tracking_visualization(
-                (masks, current_frame)
-            )
+                # Update progress
+                self.progress_bar.setValue(100)
+                self.status_label.setText(f"Frame {self._current_frame + 1} completed")
+
+                # Emit completion signal
+                self.segmentation_completed.emit(masks, metadata)
+
+            except Exception as e:
+                logger.error(f"Segmentation error on frame {self._current_frame}: {e}")
+                raise
 
         except Exception as e:
             self._on_segmentation_failed(str(e))
-    def _run_stack_segmentation(self):
-        """Run segmentation on entire stack"""
+        finally:
+            self._processing = False
+            self._last_error = None  # Clear any previous error state
+            self._update_ui_state()
+
+    @log_state_changes
+    def _run_stack_segmentation(self, preserve_existing=False):  # Add parameter to match _run_segmentation
+        """Run segmentation on entire stack with enhanced progress tracking and error handling."""
+        if self._processing or self._batch_processing:
+            logger.warning("Processing already in progress")
+            return
+
         try:
+            self._batch_processing = True
+            self._update_ui_state()
+
             image_layer = self._get_active_image_layer()
             if image_layer is None:
                 raise ValueError("No image layer selected")
@@ -148,36 +136,52 @@ class SegmentationWidget(QWidget):
             if image_layer.data.ndim < 3:
                 raise ValueError("Selected layer is not a stack")
 
-            # Initialize state for stack
-            self.state_manager.initialize_processing(image_layer.data.shape)
-
-            # Start processing
-            self.state_manager.start_processing()
-
-            total_frames = image_layer.data.shape[0]
+            # Initialize state
+            num_frames = image_layer.data.shape[0]
+            self.data_manager.initialize_stack(num_frames)
 
             # Create progress dialog
-            progress = QProgressDialog("Processing image stack...", "Cancel", 0, total_frames, self)
+            progress = QProgressDialog("Processing image stack...", "Cancel", 0, num_frames, self)
             progress.setWindowModality(Qt.WindowModal)
 
             try:
-                for i in range(total_frames):
+                for frame_idx in range(num_frames):
                     if progress.wasCanceled():
                         raise InterruptedError("Processing canceled by user")
 
                     # Update progress
-                    progress.setValue(i)
+                    progress.setValue(frame_idx)
+                    progress.setLabelText(f"Processing frame {frame_idx + 1}/{num_frames}")
 
                     # Process frame
-                    frame = image_layer.data[i]
-                    masks, metadata = self.segmentation.segment_frame(frame)
+                    self._current_frame = frame_idx
+                    frame_data = image_layer.data[frame_idx]
 
-                    # Update state
-                    self.state_manager.update_frame_result(i, masks, metadata)
+                    try:
+                        # Run segmentation on frame
+                        masks, metadata = self.segmentation.segment_frame(frame_data)
+
+                        # Update data manager
+                        self.data_manager.segmentation_data = (masks, frame_idx)
+
+                        # Update visualization
+                        self.vis_manager.update_tracking_visualization(
+                            (masks, frame_idx)
+                        )
+
+                    except Exception as e:
+                        logger.error(f"Error processing frame {frame_idx}: {e}")
+                        raise ValueError(f"Failed on frame {frame_idx}: {str(e)}")
 
             finally:
                 progress.close()
-                self.state_manager.finish_processing()
+
+            # Verify final state
+            if not self.data_manager.validate_stack_consistency():
+                raise ValueError("Stack consistency validation failed after processing")
+
+            self.status_label.setText("Stack processing completed")
+            self.progress_bar.setValue(100)
 
         except InterruptedError as e:
             logger.info(f"Stack processing interrupted: {str(e)}")
@@ -185,6 +189,113 @@ class SegmentationWidget(QWidget):
 
         except Exception as e:
             self._on_segmentation_failed(str(e))
+
+        finally:
+            self._batch_processing = False
+            self._last_error = None  # Clear any previous error state
+            self._update_ui_state()
+
+    def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
+        """Handle completion of segmentation with proper state updates."""
+        try:
+            logger.debug("Processing segmentation completion")
+
+            # Verify we're in a valid state
+            if not self.data_manager._initialized:
+                raise RuntimeError("Data manager not properly initialized")
+
+            # Update only the current frame's results
+            self.data_manager.segmentation_data = (masks, self._current_frame)
+
+            # Validate stack consistency
+            if not self.data_manager.validate_stack_consistency():
+                raise ValueError("Stack consistency validation failed after segmentation")
+
+            # Update visualization for current frame
+            self.vis_manager.update_tracking_visualization(
+                (masks, self._current_frame)
+            )
+
+            # Update UI
+            self.save_btn.setEnabled(True)
+            self.export_btn.setEnabled(True)
+            self.status_label.setText(f"Frame {self._current_frame + 1} completed successfully")
+
+        except Exception as e:
+            self._on_segmentation_failed(str(e))
+
+    def _on_segmentation_failed(self, error_msg: str):
+        """Enhanced error handling with proper state cleanup."""
+        logger.error(f"Segmentation failed: {error_msg}")
+
+        self._last_error = error_msg
+        self.progress_bar.setValue(0)
+        self.status_label.setText(f"Error: {error_msg}")
+
+        QMessageBox.critical(self, "Error", f"Segmentation failed: {error_msg}")
+        self.segmentation_failed.emit(error_msg)
+
+        # Reset processing states
+        self._processing = False
+        self._batch_processing = False
+        self._update_ui_state()
+
+    def _update_ui_state(self):
+        """Update UI elements based on current processing state."""
+        is_busy = self._processing or self._batch_processing
+        has_image_layer = self._get_active_image_layer() is not None
+
+        # Update button states
+        self.run_btn.setEnabled(not is_busy and has_image_layer)
+        self.run_stack_btn.setEnabled(not is_busy and has_image_layer)
+        self.save_btn.setEnabled(not is_busy and self.data_manager.segmentation_data is not None)
+        self.export_btn.setEnabled(not is_busy and self.data_manager.segmentation_data is not None)
+
+        # Update model-related controls
+        model_controls = [
+            self.model_combo,
+            self.custom_model_btn,
+            self.diameter_spin,
+            self.flow_spin,
+            self.prob_spin,
+            self.size_spin,
+            self.gpu_check,
+            self.normalize_check,
+            self.compute_diameter_check
+        ]
+
+        for control in model_controls:
+            control.setEnabled(not is_busy)
+
+        # Update progress indicators
+        if is_busy:
+            self.progress_bar.setEnabled(True)
+        else:
+            if self._last_error:
+                self.status_label.setText(f"Error: {self._last_error}")
+            else:
+                self.status_label.setText("Ready")
+            self.progress_bar.setEnabled(False)
+            self.progress_bar.setValue(0)  # Reset progress bar when not busy
+    def _validate_frame_update(self, frame_index: int, data: np.ndarray) -> bool:
+        """Validate frame data before update."""
+        try:
+            if not self.data_manager._initialized:
+                raise ValueError("Data manager not initialized")
+
+            if frame_index >= self.data_manager._num_frames:
+                raise ValueError(f"Frame index {frame_index} out of bounds")
+
+            if self.data_manager.segmentation_data is not None:
+                expected_shape = self.data_manager.segmentation_data.shape[1:]
+                if data.shape != expected_shape:
+                    raise ValueError(f"Frame shape mismatch: expected {expected_shape}, got {data.shape}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Frame validation failed: {e}")
+            return False
 
     @log_state_changes
     def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
@@ -325,15 +436,6 @@ class SegmentationWidget(QWidget):
             self.status_label.setText(f"Correction applied. Current cell count: {num_cells}")
         except Exception as e:
             self._on_segmentation_failed(f"Error applying correction: {str(e)}")
-
-    def _on_segmentation_failed(self, error_msg: str):
-        """Handle segmentation failure"""
-        logger.error(f"Segmentation failed: {error_msg}")
-        self.progress_bar.setValue(0)
-        self.status_label.setText(f"Error: {error_msg}")
-        QMessageBox.critical(self, "Error", f"Segmentation failed: {error_msg}")
-        self.segmentation_failed.emit(error_msg)
-        self._set_controls_enabled(True)
 
     def _ensure_model_initialized(self) -> bool:
         """Make sure model is initialized before running segmentation"""
