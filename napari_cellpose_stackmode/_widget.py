@@ -1,24 +1,10 @@
 import logging
-from pathlib import Path
-from typing import List
 
-import napari
-from qtpy.QtCore import Qt
-from qtpy.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QScrollArea, QMessageBox
-)
-
-from napari_cellpose_stackmode.cell_tracking_widget import CellTrackingWidget
-from napari_cellpose_stackmode.data_manager import DataManager
 from napari_cellpose_stackmode.segmentation_widget import SegmentationWidget
-from napari_cellpose_stackmode.visualization_manager import VisualizationManager
-
 
 logger = logging.getLogger(__name__)
 
 import logging
-from pathlib import Path
-from typing import List
 
 import napari
 from qtpy.QtCore import Qt
@@ -54,14 +40,14 @@ class CellposeStackmodeWidget(QWidget):
         title.setStyleSheet("font-weight: bold; font-size: 14px;")
         container_layout.addWidget(title)
 
-        # Initialize managers
-        self.visualization_manager = VisualizationManager(self.viewer)
+        # Initialize managers first
         self.data_manager = DataManager()
+        self.visualization_manager = VisualizationManager(self.viewer, self.data_manager)
 
         # Create tab widget for different components
         tabs = QTabWidget()
 
-        # Initialize component widgets
+        # Initialize component widgets with the managers
         self.preprocessing_widget = PreprocessingWidget(
             self.viewer,
             self.data_manager,
@@ -84,7 +70,6 @@ class CellposeStackmodeWidget(QWidget):
         tabs.addTab(self.preprocessing_widget, "Preprocessing")
         tabs.addTab(self.tracking_widget, "Cell Tracking")
         tabs.addTab(self.segmentation_widget, "Segmentation")
-
 
         # Add tabs to container
         container_layout.addWidget(tabs)

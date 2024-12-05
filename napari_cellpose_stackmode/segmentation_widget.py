@@ -81,6 +81,7 @@ class SegmentationWidget(QWidget):
         # Update UI states
         self._update_button_states()
 
+
     @log_state_changes
     def _run_segmentation(self, preserve_existing=False):
         """Run segmentation on current frame"""
@@ -94,11 +95,13 @@ class SegmentationWidget(QWidget):
                 logger.debug("Segmentation cancelled - no image layer")
                 raise ValueError("No image layer selected")
 
-            current_frame = int(self.viewer.dims.point[0])
+            # Get number of frames and initialize if needed
             num_frames = image_layer.data.shape[0] if image_layer.data.ndim > 2 else 1
+            current_frame = int(self.viewer.dims.point[0])
 
             # Initialize DataManager if needed
-            if not hasattr(self.data_manager, '_num_frames'):
+            if self.data_manager._segmentation_data is None:
+                logger.debug(f"Initializing data manager with {num_frames} frames")
                 self.data_manager.initialize_stack(num_frames)
 
             logger.debug(f"Running segmentation on frame {current_frame}")
@@ -123,16 +126,7 @@ class SegmentationWidget(QWidget):
             masks, metadata = self.segmentation.segment_frame(frame_data)
 
             # Update only the current frame while preserving other frames
-            if self.data_manager.segmentation_data is not None:
-                self.data_manager.segmentation_data = masks, current_frame
-            else:
-                # First time - initialize with proper shape
-                if data.ndim > 2:
-                    full_stack = np.zeros(data.shape, dtype=np.uint16)
-                    full_stack[current_frame] = masks
-                    self.data_manager.segmentation_data = full_stack
-                else:
-                    self.data_manager.segmentation_data = masks[np.newaxis, ...]
+            self.data_manager.segmentation_data = (masks, current_frame)
 
             # Finish processing
             self.state_manager.finish_processing()
@@ -199,18 +193,45 @@ class SegmentationWidget(QWidget):
             logger.debug("Processing segmentation completion")
             current_frame = int(self.viewer.dims.point[0])
 
-            # Update data manager with current frame
+            # Update data manager with current frame only
             self.data_manager.segmentation_data = (masks, current_frame)
+
+            # Validate stack consistency
+            if not self.validate_stack_consistency():
+                raise ValueError("Stack consistency validation failed after segmentation")
+
+            # Update visualization for current frame only
+            self.vis_manager.update_tracking_visualization((masks, current_frame))
 
             # Enable buttons and update status
             self.save_btn.setEnabled(True)
             self.export_btn.setEnabled(True)
 
-            # Emit completion signal
-            self.segmentation_completed.emit(masks, results)
+            # Emit completion signal with full stack
+            if self.data_manager.segmentation_data is not None:
+                self.segmentation_completed.emit(self.data_manager.segmentation_data, results)
+            else:
+                self.segmentation_completed.emit(masks, results)
 
         except Exception as e:
             self._on_segmentation_failed(str(e))
+
+    def validate_stack_consistency(self):
+        """Validate that all components have consistent data"""
+        if self.data_manager.segmentation_data is None:
+            return True
+
+        stack_shape = self.data_manager.segmentation_data.shape
+        visualization_shape = (
+            self.vis_manager.tracking_layer.data.shape
+            if self.vis_manager.tracking_layer is not None else None
+        )
+
+        if visualization_shape is not None and stack_shape != visualization_shape:
+            logger.error(f"Stack shape mismatch: DataManager={stack_shape}, Visualization={visualization_shape}")
+            return False
+
+        return True
 
     def _update_button_states(self):
         """Update button states based on current state"""

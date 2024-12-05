@@ -68,38 +68,26 @@ class DataManager:
                 if not isinstance(data, np.ndarray):
                     raise ValueError("Segmentation data must be a numpy array")
 
-                # If we already have data, preserve the stack structure
-                if self._segmentation_data is not None:
-                    # Create a copy to avoid modifying the original
-                    new_data = self._segmentation_data.copy()
+                # Initialize stack if needed
+                if self._segmentation_data is None:
+                    if self._num_frames is None:
+                        raise ValueError("Must call initialize_stack before first update")
+                    self._segmentation_data = np.zeros((self._num_frames, *data.shape), dtype=data.dtype)
 
-                    # Handle 2D or 3D input for single frame
-                    if data.ndim == 2:
-                        new_data[current_frame] = data
-                    elif data.ndim == 3 and data.shape[0] == 1:
-                        new_data[current_frame] = data[0]
-                    else:
-                        raise ValueError(f"Invalid data shape for single frame update: {data.shape}")
-
-                    self._segmentation_data = new_data
-                else:
-                    # Initialize new stack
-                    if data.ndim == 2:
-                        if self._num_frames is None:
-                            raise ValueError("Must call initialize_stack before first update")
-                        new_data = np.zeros((self._num_frames, *data.shape), dtype=data.dtype)
-                        new_data[current_frame] = data
-                        self._segmentation_data = new_data
-                    else:
-                        raise ValueError("Expected 2D array for initialization")
+                # Update only the specified frame while preserving others
+                self._segmentation_data[current_frame] = data
             else:
-                # Regular full stack update
+                # Full stack update - validate and assign
                 if value is not None:
                     if not isinstance(value, np.ndarray):
                         raise ValueError("Segmentation data must be a numpy array")
-                    if value.ndim == 2:
-                        value = value[np.newaxis, ...]  # Ensure 3D
+                    if self._segmentation_data is not None and value.shape != self._segmentation_data.shape:
+                        raise ValueError(f"Shape mismatch: expected {self._segmentation_data.shape}, got {value.shape}")
                 self._segmentation_data = value
+
+            # Validate after update
+            if not self.validate_stack_consistency():
+                raise ValueError("Stack consistency check failed after update")
 
         finally:
             self._updating = False
@@ -139,6 +127,19 @@ class DataManager:
         except Exception as e:
             logger.error(f"Error saving tracking results: {e}")
             raise
+
+    def validate_stack_consistency(self):
+        """Validate that all components have consistent data"""
+        if self._segmentation_data is None:
+            return True
+
+        # Check if we have the expected number of frames
+        if self._num_frames is not None:
+            if self._segmentation_data.shape[0] != self._num_frames:
+                logger.error(f"Frame count mismatch: expected {self._num_frames}, got {self._segmentation_data.shape[0]}")
+                return False
+
+        return True
 
     def load_tracking_results(self, path: Path) -> None:
         """Load tracking results from a TIFF file."""
