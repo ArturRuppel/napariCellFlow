@@ -59,9 +59,15 @@ class SegmentationState:
         if mask.shape != self.full_stack.shape[1:]:
             raise ValueError(f"Mask shape {mask.shape} doesn't match stack shape {self.full_stack.shape[1:]}")
 
+        logger.debug(f"Before update - full_stack shape: {self.full_stack.shape}")
+        logger.debug(f"Before update - unique values in full_stack: {np.unique(self.full_stack)}")
+
         self.full_stack[frame_index] = mask
         self.processed_frames[frame_index] = True
         self.current_frame = frame_index
+
+        logger.debug(f"After update - full_stack shape: {self.full_stack.shape}")
+        logger.debug(f"After update - unique values in full_stack: {np.unique(self.full_stack)}")
 
     def get_frame(self, frame_index: int) -> Optional[np.ndarray]:
         """Get a specific frame from the stack"""
@@ -107,13 +113,17 @@ class SegmentationStateManager:
     def initialize_processing(self, data_shape: Tuple[int, ...]) -> None:
         """Initialize for new processing job"""
         try:
-            self.state = SegmentationState()
-            self.state.initialize_stack(data_shape)
+            if self.state.full_stack is None:
+                # Initialize a new stack only if there isn't an existing one
+                self.state.initialize_stack(data_shape)
+            else:
+                # Check if the existing stack shape matches the new data shape
+                if self.state.full_stack.shape != data_shape:
+                    raise ValueError(f"New data shape {data_shape} doesn't match existing stack shape {self.state.full_stack.shape}")
             self._notify_state_change()
         except Exception as e:
             logger.error(f"Failed to initialize processing: {e}")
             raise
-
     @log_state_changes
     def update_frame_result(self, frame_index: int, mask: np.ndarray, metadata: Dict[str, Any] = None) -> None:
         """Update results for a single frame"""
@@ -123,10 +133,13 @@ class SegmentationStateManager:
             logger.debug(f"Input mask shape: {mask.shape}")
             logger.debug(f"Unique values in input mask: {np.unique(mask)}")
 
+            logger.debug(f"Before update - full_stack shape: {self.state.full_stack.shape}")
+            logger.debug(f"Before update - unique values in full_stack: {np.unique(self.state.full_stack)}")
+
             self.state.update_frame(frame_index, mask)
 
-            logger.debug(f"Updated full stack shape: {self.state.full_stack.shape}")
-            logger.debug(f"Unique values in updated full stack: {np.unique(self.state.full_stack)}")
+            logger.debug(f"After update - full_stack shape: {self.state.full_stack.shape}")
+            logger.debug(f"After update - unique values in full_stack: {np.unique(self.state.full_stack)}")
 
             if metadata:
                 self.state.metadata[f"frame_{frame_index}"] = metadata

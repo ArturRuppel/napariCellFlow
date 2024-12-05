@@ -315,6 +315,9 @@ class CellCorrectionWidget(QWidget):
             logger.debug("Deletion skipped - no current mask")
             return
 
+        logger.debug(f"Before deletion - current_mask shape: {current_mask.shape}")
+        logger.debug(f"Before deletion - unique values in current_mask: {np.unique(current_mask)}")
+
         cell_id = current_mask[coords[0], coords[1]]
         if cell_id > 0:
             try:
@@ -325,6 +328,9 @@ class CellCorrectionWidget(QWidget):
                 # Create a copy of just the current frame
                 new_frame = current_mask.copy()
                 new_frame[new_frame == cell_id] = 0
+
+                logger.debug(f"After deletion - new_frame shape: {new_frame.shape}")
+                logger.debug(f"After deletion - unique values in new_frame: {np.unique(new_frame)}")
 
                 # Update only the current frame in the full stack
                 if hasattr(self, '_full_masks') and self._full_masks is not None:
@@ -386,6 +392,9 @@ class CellCorrectionWidget(QWidget):
 
         try:
             self._updating = True
+
+            logger.debug(f"Updated masks shape: {updated_masks.shape}")
+            logger.debug(f"Unique values in updated masks: {np.unique(updated_masks)}")
 
             # Block napari events during update
             with self.viewer.events.blocker_all():

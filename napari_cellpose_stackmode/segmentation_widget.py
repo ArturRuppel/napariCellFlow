@@ -105,11 +105,7 @@ class SegmentationWidget(QWidget):
                     self.state_manager.initialize_processing((1, *data.shape))
                 else:
                     self.state_manager.initialize_processing(data.shape)
-            else:
-                # If we already have a stack, preserve it
-                preserved_stack = self.state_manager.state.full_stack.copy()
-                self.state_manager.initialize_processing(preserved_stack.shape)
-                self.state_manager.state.full_stack = preserved_stack
+
 
             # Get current frame data
             frame_data = data[current_frame] if data.ndim > 2 else data
