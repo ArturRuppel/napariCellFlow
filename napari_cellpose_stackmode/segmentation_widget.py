@@ -53,17 +53,17 @@ class SegmentationWidget(QWidget):
         self._update_ui_state()
 
     @log_operation
-    def _run_segmentation(self, preserve_existing=False):  # Add the parameter here
-        """Run segmentation on current frame with enhanced error handling and state management."""
+    @log_operation
+    def _run_segmentation(self, preserve_existing=False):
+        """Run segmentation on current frame with enhanced error handling."""
         if self._processing:
             logger.warning("Segmentation already in progress")
             return
 
-        try:
-            self._processing = True
-            self._update_ui_state()
+        self._processing = True
+        self._update_ui_state()
 
-            # Validate prerequisites
+        try:
             if not self._ensure_model_initialized():
                 return
 
@@ -71,53 +71,47 @@ class SegmentationWidget(QWidget):
             if image_layer is None:
                 raise ValueError("No image layer selected")
 
-            # Get frame information
-            self._current_frame = int(self.viewer.dims.point[0])
+            # Get number of frames and current frame
             num_frames = image_layer.data.shape[0] if image_layer.data.ndim > 2 else 1
+            self._current_frame = int(self.viewer.dims.point[0])
 
-            # Initialize data manager if needed
-            if not self.data_manager._initialized:
+            # Check if we're in preview mode
+            preview_mode = any(layer.name == 'Preview' for layer in self.viewer.layers)
+
+            # Case 1: Preview mode without initialized stack
+            if preview_mode and not self.data_manager._initialized:
+                QMessageBox.warning(
+                    self,
+                    "Initialization Required",
+                    "Please initialize segmentation on the full stack first before segmenting preview frames.\n\n"
+                    "Tip: Run 'Initialize Stack' or segment the unprocessed stack first."
+                )
+                return
+
+            # Case 2: Regular segmentation - initialize if needed
+            if not preview_mode and not self.data_manager._initialized:
                 logger.debug(f"Initializing data manager with {num_frames} frames")
                 self.data_manager.initialize_stack(num_frames)
 
-            # Get current frame data
+            # Get frame data
             frame_data = (image_layer.data[self._current_frame]
                           if image_layer.data.ndim > 2 else image_layer.data)
 
-            # Update progress
-            self.progress_bar.setValue(0)
-            self.status_label.setText(f"Processing frame {self._current_frame + 1}/{num_frames}")
-
             # Run segmentation
-            try:
-                masks, metadata = self.segmentation.segment_frame(frame_data)
+            masks, metadata = self.segmentation.segment_frame(frame_data)
+            self.data_manager.segmentation_data = (masks, self._current_frame)
+            self.vis_manager.update_tracking_visualization((masks, self._current_frame))
 
-                # Update data manager with frame results
-                self.data_manager.segmentation_data = (masks, self._current_frame)
-
-                # Update visualization for current frame
-                self.vis_manager.update_tracking_visualization(
-                    (masks, self._current_frame)
-                )
-
-                # Update progress
-                self.progress_bar.setValue(100)
-                self.status_label.setText(f"Frame {self._current_frame + 1} completed")
-
-                # Emit completion signal
-                self.segmentation_completed.emit(masks, metadata)
-
-            except Exception as e:
-                logger.error(f"Segmentation error on frame {self._current_frame}: {e}")
-                raise
+            self.progress_bar.setValue(100)
+            self.status_label.setText(f"Frame {self._current_frame + 1} completed")
+            self.segmentation_completed.emit(masks, metadata)
 
         except Exception as e:
             self._on_segmentation_failed(str(e))
         finally:
             self._processing = False
-            self._last_error = None  # Clear any previous error state
+            self._last_error = None
             self._update_ui_state()
-
     @log_operation
     def _run_stack_segmentation(self, preserve_existing=False):
         """Run segmentation on entire stack with enhanced progress tracking and error handling."""
