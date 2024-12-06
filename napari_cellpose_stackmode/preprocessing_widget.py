@@ -51,6 +51,80 @@ class PreprocessingWidget(QWidget):
         self.setup_ui()
         self.connect_signals()
 
+        # Add layer removal event handler
+        self.viewer.layers.events.removed.connect(self._handle_layer_removal)
+
+    def _handle_layer_removal(self, event):
+        """Handle layer removal events"""
+        removed_layer = event.value
+
+        # Check if the removed layer was our preview layer
+        if removed_layer == self.preview_layer:
+            logger.debug("Preview layer was removed")
+            self.preview_layer = None
+            self.preview_enabled = False
+            self.preview_check.setChecked(False)
+
+        # Check if the removed layer was our original layer
+        if removed_layer == self.original_layer:
+            logger.debug("Original layer was removed")
+            self.original_layer = None
+            if self.preview_layer is not None:
+                self.viewer.layers.remove(self.preview_layer)
+                self.preview_layer = None
+            self.preview_enabled = False
+            self.preview_check.setChecked(False)
+
+    def toggle_preview(self, enabled: bool):
+        """Toggle preview mode"""
+        self.preview_enabled = enabled
+
+        try:
+            if enabled:
+                # If we don't have a stored original layer, find it
+                if self.original_layer is None:
+                    # First try to get the selected layer
+                    selected = self.viewer.layers.selection.active
+                    if isinstance(selected, Image):
+                        self.original_layer = selected
+                    else:
+                        # If no image is selected, look for the first image layer
+                        for layer in self.viewer.layers:
+                            if isinstance(layer, Image):
+                                self.original_layer = layer
+                                break
+
+                    if self.original_layer is None:
+                        QMessageBox.warning(self, "Warning", "No image layer found")
+                        self.preview_check.setChecked(False)
+                        return
+
+                # Always create a new preview layer if enabled and not existing
+                if self.preview_layer is None:
+                    preview_data = (self.original_layer.data[0] if self.original_layer.data.ndim == 3
+                                    else self.original_layer.data)
+                    self.preview_layer = self.viewer.add_image(
+                        np.zeros_like(preview_data),
+                        name='Preview',
+                        visible=True
+                    )
+
+                # Update preview
+                self.update_preview_frame()
+            else:
+                # Remove preview layer
+                if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
+                    self.viewer.layers.remove(self.preview_layer)
+                self.preview_layer = None
+
+        except Exception as e:
+            logger.error(f"Error toggling preview: {e}")
+            self.preview_check.setChecked(False)
+            self.preview_enabled = False
+            if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
+                self.viewer.layers.remove(self.preview_layer)
+            self.preview_layer = None
+
     def setup_ui(self):
         """Initialize the user interface with aligned controls and odd-only median filter"""
         layout = QVBoxLayout()
@@ -584,55 +658,6 @@ class PreprocessingWidget(QWidget):
         """Enable/disable CLAHE parameter controls"""
         self.clahe_clip_spin.setEnabled(enabled)
         self.clahe_grid_spin.setEnabled(enabled)
-
-    def toggle_preview(self, enabled: bool):
-        """Toggle preview mode"""
-        self.preview_enabled = enabled
-
-        try:
-            if enabled:
-                # If we don't have a stored original layer, find it
-                if self.original_layer is None:
-                    # First try to get the selected layer
-                    selected = self.viewer.layers.selection.active
-                    if isinstance(selected, Image):
-                        self.original_layer = selected
-                    else:
-                        # If no image is selected, look for the first image layer
-                        for layer in self.viewer.layers:
-                            if isinstance(layer, Image):
-                                self.original_layer = layer
-                                break
-
-                    if self.original_layer is None:
-                        QMessageBox.warning(self, "Warning", "No image layer found")
-                        self.preview_check.setChecked(False)  # Fixed from preview_checkbox
-                        return
-
-                # Create preview layer if needed
-                if self.preview_layer is None:
-                    self.preview_layer = self.viewer.add_image(
-                        np.zeros_like(self.original_layer.data[0] if self.original_layer.data.ndim == 3
-                                      else self.original_layer.data),
-                        name='Preview',
-                        visible=True
-                    )
-
-                # Update preview
-                self.update_preview_frame()
-            else:
-                # Remove preview layer
-                if self.preview_layer is not None:
-                    self.viewer.layers.remove(self.preview_layer)
-                    self.preview_layer = None
-
-        except Exception as e:
-            logger.error(f"Error toggling preview: {e}")
-            self.preview_check.setChecked(False)  # Fixed from preview_checkbox
-            self.preview_enabled = False
-            if self.preview_layer is not None:
-                self.viewer.layers.remove(self.preview_layer)
-                self.preview_layer = None
 
     def _update_status(self, message: str, progress: Optional[int] = None):
         """Update status message and progress bar"""
