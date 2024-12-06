@@ -5,7 +5,7 @@ import napari
 from napari.utils.transforms import Affine
 
 from napari_cellpose_stackmode import data_manager
-from napari_cellpose_stackmode.debug_logging import log_visualization_ops
+from napari_cellpose_stackmode.debug_logging import log_operation
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class VisualizationManager:
         self._updating = False
         self._current_dims = None  # Track current data dimensions
 
-    @log_visualization_ops
+    @log_operation
     def update_tracking_visualization(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> None:
         """Update the tracking visualization with new data."""
         if self._updating:
@@ -51,7 +51,7 @@ class VisualizationManager:
             if self.tracking_layer is not None:
                 self.tracking_layer.refresh()
 
-    @log_visualization_ops
+    @log_operation
     def _update_single_frame(self, frame_data: np.ndarray, frame_index: int) -> None:
         """Update a single frame in the visualization."""
         if frame_data.ndim != 2:
@@ -86,7 +86,7 @@ class VisualizationManager:
             current_data[frame_index] = frame_data
             self.tracking_layer.data = current_data
 
-    @log_visualization_ops
+    @log_operation
     def _update_full_stack(self, stack_data: np.ndarray) -> None:
         """Update the visualization with a full stack of data."""
         logger.debug(f"Updating full stack with shape {stack_data.shape}")
@@ -178,7 +178,7 @@ class VisualizationManager:
     def set_data_manager(self, data_manager: "DataManager"):
         """Allow setting the data manager after initialization."""
         self.data_manager = data_manager
-    @log_visualization_ops
+    @log_operation
     def update_tracking_visualization(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> None:
         """Update the tracking visualization with new data."""
         if self._updating:
@@ -208,7 +208,7 @@ class VisualizationManager:
             if self.tracking_layer is not None:
                 self.tracking_layer.refresh()
 
-    @log_visualization_ops
+    @log_operation
     def _update_single_frame(self, frame_data: np.ndarray, frame_index: int) -> None:
         """Update a single frame in the visualization."""
         if frame_data.ndim != 2:
@@ -243,7 +243,7 @@ class VisualizationManager:
             current_data[frame_index] = frame_data
             self.tracking_layer.data = current_data
 
-    @log_visualization_ops
+    @log_operation
     def _update_full_stack(self, stack_data: np.ndarray) -> None:
         """Update the visualization with a full stack of data."""
         logger.debug(f"Updating full stack with shape {stack_data.shape}")

@@ -21,7 +21,7 @@ from .segmentation import SegmentationHandler, SegmentationParameters
 from .data_manager import DataManager
 from .visualization_manager import VisualizationManager
 from .segmentation_state import SegmentationStateManager
-from .debug_logging import log_state_changes, log_array_info, logger
+from .debug_logging import logger, log_operation
 
 
 class SegmentationWidget(QWidget):
@@ -52,7 +52,7 @@ class SegmentationWidget(QWidget):
         self._connect_signals()
         self._update_ui_state()
 
-    @log_state_changes
+    @log_operation
     def _run_segmentation(self, preserve_existing=False):  # Add the parameter here
         """Run segmentation on current frame with enhanced error handling and state management."""
         if self._processing:
@@ -118,7 +118,7 @@ class SegmentationWidget(QWidget):
             self._last_error = None  # Clear any previous error state
             self._update_ui_state()
 
-    @log_state_changes
+    @log_operation
     def _run_stack_segmentation(self, preserve_existing=False):  # Add parameter to match _run_segmentation
         """Run segmentation on entire stack with enhanced progress tracking and error handling."""
         if self._processing or self._batch_processing:
@@ -297,7 +297,7 @@ class SegmentationWidget(QWidget):
             logger.error(f"Frame validation failed: {e}")
             return False
 
-    @log_state_changes
+    @log_operation
     def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
         """Handle completion of segmentation"""
         try:

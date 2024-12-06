@@ -12,7 +12,7 @@ import cv2
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Union, Dict
-from .debug_logging import log_state_changes, log_array_info, logger
+from .debug_logging import logger, log_operation
 
 logger = logging.getLogger(__name__)
 
@@ -403,7 +403,7 @@ class CellCorrectionWidget(QWidget):
         finally:
             self._updating = False
 
-    @log_state_changes
+    @log_operation
     def set_masks_layer(self, masks: np.ndarray):
         """Set or update the masks layer."""
         if self._updating:
@@ -459,7 +459,7 @@ class CellCorrectionWidget(QWidget):
         finally:
             self._updating = False
 
-    @log_state_changes
+    @log_operation
     def _finish_drawing(self):
         """Complete the cell drawing process."""
         if not self.drawing_points or len(self.drawing_points) < 3:

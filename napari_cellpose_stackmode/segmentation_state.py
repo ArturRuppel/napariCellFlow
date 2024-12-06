@@ -1,10 +1,10 @@
 import logging
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple
-import numpy as np
-from pathlib import Path
 
-from napari_cellpose_stackmode.debug_logging import log_state_changes
+import numpy as np
+
+from napari_cellpose_stackmode.debug_logging import log_operation
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class SegmentationStateManager:
         except Exception as e:
             logger.error(f"Failed to initialize processing: {e}")
             raise
-    @log_state_changes
+    @log_operation
     def update_frame_result(self, frame_index: int, mask: np.ndarray, metadata: Dict[str, Any] = None) -> None:
         """Update results for a single frame"""
         try:

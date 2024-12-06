@@ -4,7 +4,7 @@ from typing import Optional, Tuple, Union
 from threading import Lock
 import numpy as np
 import tifffile
-from .debug_logging import log_state_changes, log_array_info, logger, log_data_manager_ops
+from .debug_logging import log_operation
 
 logger = logging.getLogger(__name__)
 
@@ -36,14 +36,14 @@ class DataManager:
                 raise ValueError(f"Stack initialization failed: {str(e)}")
 
     @property
-    @log_data_manager_ops
+    @log_operation
     def preprocessed_data(self) -> Optional[np.ndarray]:
         """Get the preprocessed data."""
         with self._lock:
             return self._preprocessed_data
 
     @preprocessed_data.setter
-    @log_data_manager_ops
+    @log_operation
     def preprocessed_data(self, data: Optional[np.ndarray]):
         """Set the preprocessed data with validation."""
         if self._updating:
@@ -63,14 +63,14 @@ class DataManager:
                 self._updating = False
 
     @property
-    @log_data_manager_ops
+    @log_operation
     def segmentation_data(self) -> Optional[np.ndarray]:
         """Get the segmentation data."""
         with self._lock:
             return self._segmentation_data
 
     @segmentation_data.setter
-    @log_data_manager_ops
+    @log_operation
     def segmentation_data(self, value: Union[np.ndarray, Tuple[np.ndarray, int]]):
         """
         Set the segmentation data with enhanced frame preservation.
@@ -180,7 +180,7 @@ class DataManager:
             return self._tracked_data
 
     @tracked_data.setter
-    @log_data_manager_ops
+    @log_operation
     def tracked_data(self, data: Optional[np.ndarray]):
         """Set the tracked data with validation."""
         if self._updating:
