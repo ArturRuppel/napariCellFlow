@@ -1,64 +1,144 @@
-import logging
 from dataclasses import dataclass
 from typing import Tuple, Optional
 import numpy as np
 import cv2
-
+import logging
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PreprocessingParameters:
-    """Parameters for image preprocessing"""
-    # Median filter parameters
-    median_filter_size: int = 7
+    """Parameters for image preprocessing with integer intensity values"""
+    # Contrast enhancement (absolute intensity values, integers for 8-bit)
+    min_intensity: int = 0
+    max_intensity: int = 255  # Fixed for 8-bit
+
+    # Optional filters
+    enable_median_filter: bool = False
+    median_filter_size: int = 3
+
+    enable_gaussian_filter: bool = False
+    gaussian_sigma: float = 1.0  # This remains float as it's a kernel parameter
 
     # CLAHE parameters
+    enable_clahe: bool = False
     clahe_clip_limit: float = 16.0
     clahe_grid_size: int = 16
 
-    # Intensity clipping parameters
-    initial_lower_percentile: float = 1.0
-    final_lower_percentile: float = 30.0
-    final_upper_percentile: float = 99.0
-
-    # Dark region threshold
-    black_region_threshold: int = 3
-
     def validate(self):
         """Validate parameter values"""
+        if not 0 <= self.min_intensity < self.max_intensity <= 255:
+            raise ValueError("Intensity values must be between 0 and 255")
         if self.median_filter_size % 2 != 1:
             raise ValueError("Median filter size must be odd")
         if self.median_filter_size < 1:
             raise ValueError("Median filter size must be positive")
+        if self.gaussian_sigma <= 0:
+            raise ValueError("Gaussian sigma must be positive")
         if self.clahe_clip_limit <= 0:
             raise ValueError("CLAHE clip limit must be positive")
         if self.clahe_grid_size < 1:
             raise ValueError("CLAHE grid size must be positive")
-        if not 0 <= self.initial_lower_percentile < 100:
-            raise ValueError("Initial lower percentile must be between 0 and 100")
-        if not 0 <= self.final_lower_percentile < self.final_upper_percentile <= 100:
-            raise ValueError("Final percentiles must be between 0 and 100 and in order")
-        if self.black_region_threshold < 0 or self.black_region_threshold > 255:
-            raise ValueError("Black region threshold must be between 0 and 255")
 
 
 class ImagePreprocessor:
-    """Handles image preprocessing operations for cell segmentation"""
+    """Handles image preprocessing with explicit 8-bit conversion first"""
 
     def __init__(self, parameters: Optional[PreprocessingParameters] = None):
         self.params = parameters or PreprocessingParameters()
 
-    def preprocess_stack(self, image_stack: np.ndarray) -> Tuple[np.ndarray, list]:
+    def convert_to_8bit(self, image: np.ndarray) -> np.ndarray:
         """
-        Preprocess an entire image stack.
+        Convert any input image to 8-bit using percentile-based scaling.
 
         Args:
-            image_stack: 3D numpy array (t, y, x)
+            image: Input image array of any bit depth
 
         Returns:
-            Tuple of (preprocessed stack, list of preprocessing info per frame)
+            8-bit image array
         """
+        # Use percentiles to ignore outliers
+        img_min = np.percentile(image, 1)
+        img_max = np.percentile(image, 99)
+
+        # Clip to the percentile range
+        image_clipped = np.clip(image, img_min, img_max)
+
+        # Scale to full 8-bit range
+        image_scaled = ((image_clipped - img_min) / (img_max - img_min) * 255).astype(np.uint8)
+
+        return image_scaled
+
+    def preprocess_frame(self, image: np.ndarray) -> Tuple[np.ndarray, dict]:
+        """
+        Preprocess a single image frame.
+
+        Args:
+            image: 2D numpy array of any bit depth
+
+        Returns:
+            Tuple of (preprocessed image, preprocessing info dictionary)
+        """
+        # Store original statistics
+        info = {
+            'original_dtype': image.dtype,
+            'original_range': (int(image.min()), int(image.max())),
+            'original_mean': float(image.mean()),
+            'original_std': float(image.std())
+        }
+
+        # Step 1: Convert to 8-bit if not already
+        if image.dtype != np.uint8:
+            processed = self.convert_to_8bit(image)
+        else:
+            processed = image.copy()
+
+        # Step 2: Apply intensity scaling based on parameters
+        lut = np.zeros(256, dtype=np.uint8)
+        # Create lookup table that maps [min_intensity, max_intensity] to [0, 255]
+        # Add +1 to the size calculation to include max_intensity in the range
+        lut[self.params.min_intensity:self.params.max_intensity + 1] = np.linspace(
+            0, 255, self.params.max_intensity - self.params.min_intensity + 1,
+            dtype=np.uint8
+        )
+        # Ensure all values >= max_intensity map to 255
+        lut[self.params.max_intensity:] = 255
+        processed = lut[processed]
+
+        # Step 3: Apply gaussian filter if enabled
+        if self.params.enable_gaussian_filter:
+            processed = cv2.GaussianBlur(
+                processed,
+                (0, 0),  # Auto kernel size
+                self.params.gaussian_sigma
+            )
+
+        # Step 4: Apply median filter if enabled
+        if self.params.enable_median_filter:
+            processed = cv2.medianBlur(
+                processed,
+                self.params.median_filter_size
+            )
+
+        # Step 5: Apply CLAHE if enabled
+        if self.params.enable_clahe:
+            clahe = cv2.createCLAHE(
+                clipLimit=self.params.clahe_clip_limit,
+                tileGridSize=(self.params.clahe_grid_size, self.params.clahe_grid_size)
+            )
+            processed = clahe.apply(processed)
+
+        # Store final statistics
+        info.update({
+            'final_mean': float(processed.mean()),
+            'final_std': float(processed.std()),
+            'intensity_range': (self.params.min_intensity, self.params.max_intensity)
+        })
+
+        return processed, info
+
+    def preprocess_stack(self, image_stack: np.ndarray) -> Tuple[np.ndarray, list]:
+        """Process an entire image stack."""
         if image_stack.ndim != 3:
             raise ValueError(f"Expected 3D stack, got shape {image_stack.shape}")
 
@@ -72,78 +152,6 @@ class ImagePreprocessor:
 
         return processed_stack, preprocessing_info
 
-    def preprocess_frame(self, image: np.ndarray) -> Tuple[np.ndarray, dict]:
-        """
-        Preprocess a single image frame.
-
-        Args:
-            image: 2D numpy array
-
-        Returns:
-            Tuple of (preprocessed image, preprocessing info dictionary)
-        """
-        # Store original statistics
-        info = {
-            'original_dtype': image.dtype,
-            'original_range': (float(image.min()), float(image.max())),
-            'original_mean': float(image.mean()),
-            'original_std': float(image.std())
-        }
-
-        # Scale to 8-bit
-        scaled = self._scale_to_8bit(image)
-        info['post_scaling_mean'] = float(scaled.mean())
-
-        # Initial percentile-based clipping
-        lower = np.percentile(scaled, self.params.initial_lower_percentile)
-        pre_clipped = np.clip(scaled, lower, 255).astype(np.uint8)
-        info['initial_clip_threshold'] = float(lower)
-
-        # Median filtering
-        median_filtered = cv2.medianBlur(pre_clipped, self.params.median_filter_size)
-
-        # CLAHE enhancement
-        clahe = cv2.createCLAHE(
-            clipLimit=self.params.clahe_clip_limit,
-            tileGridSize=(self.params.clahe_grid_size, self.params.clahe_grid_size)
-        )
-        enhanced = clahe.apply(median_filtered)
-
-        # Final percentile-based clipping
-        final_lower = np.percentile(enhanced, self.params.final_lower_percentile)
-        final_upper = np.percentile(enhanced, self.params.final_upper_percentile)
-        final_enhanced = np.clip(enhanced, final_lower, final_upper)
-
-        # Rescale to full range
-        if final_upper > final_lower:
-            final_enhanced = ((final_enhanced - final_lower) *
-                              (255.0 / (final_upper - final_lower))).clip(0, 255)
-
-        final_enhanced = final_enhanced.astype(np.uint8)
-
-        # Create exclude mask
-        exclude_mask = self._create_exclude_mask(final_enhanced)
-
-        # Store final statistics
-        info.update({
-            'final_lower_threshold': float(final_lower),
-            'final_upper_threshold': float(final_upper),
-            'final_mean': float(final_enhanced.mean()),
-            'final_std': float(final_enhanced.std()),
-            'excluded_pixels': int(np.sum(exclude_mask))
-        })
-
-        return final_enhanced, info
-
-    def _scale_to_8bit(self, image: np.ndarray) -> np.ndarray:
-        """Scale image to 8-bit with proper normalization"""
-        img_min = np.percentile(image, 1)
-        img_max = np.percentile(image, 99)
-
-        image_clipped = np.clip(image, img_min, img_max)
-        image_scaled = ((image_clipped - img_min) / (img_max - img_min) * 255).astype(np.uint8)
-
-        return image_scaled
 
     def _create_exclude_mask(self, image: np.ndarray) -> np.ndarray:
         """Create mask of dark regions to exclude from analysis"""
