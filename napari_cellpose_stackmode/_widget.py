@@ -68,8 +68,9 @@ class CellposeStackmodeWidget(QWidget):
 
         # Add widgets to tabs
         tabs.addTab(self.preprocessing_widget, "Preprocessing")
-        tabs.addTab(self.tracking_widget, "Cell Tracking")
         tabs.addTab(self.segmentation_widget, "Segmentation")
+        tabs.addTab(self.tracking_widget, "Cell Tracking")
+
 
         # Add tabs to container
         container_layout.addWidget(tabs)

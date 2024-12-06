@@ -352,7 +352,6 @@ class SegmentationWidget(QWidget):
 
         # Connect export/import buttons
         self.export_btn.clicked.connect(self.export_to_cellpose)
-        self.launch_gui_btn.clicked.connect(self.launch_cellpose_gui)
         self.import_btn.clicked.connect(self.import_corrections)
 
         # Model selection signals
@@ -520,7 +519,7 @@ class SegmentationWidget(QWidget):
         layout.addWidget(button_group)
 
         # Add Correction Workflow section
-        correction_group = QGroupBox("Manual Correction Workflow")
+        correction_group = QGroupBox("Manual Correction Tools")
         correction_layout = QVBoxLayout()
         correction_group.setLayout(correction_layout)
 
@@ -532,26 +531,34 @@ class SegmentationWidget(QWidget):
         )
         correction_layout.addWidget(self.correction_widget)
 
+        # Add Cellpose integration section
+        cellpose_group = QGroupBox("Cellpose Integration")
+        cellpose_layout = QVBoxLayout()
+        cellpose_group.setLayout(cellpose_layout)
+
         # Add informative label
         info_label = QLabel(
-            "Export segmentation to edit in Cellpose GUI, then import corrections"
+            "You can export the current segmentation to edit in Cellpose, "
+            "then import the corrected results back."
         )
         info_label.setWordWrap(True)
-        correction_layout.addWidget(info_label)
+        cellpose_layout.addWidget(info_label)
 
-        # Correction workflow buttons
-        correction_buttons_layout = QHBoxLayout()
+        # Cellpose integration buttons
+        cellpose_buttons_layout = QHBoxLayout()
         self.export_btn = QPushButton("Export to Cellpose")
-        self.launch_gui_btn = QPushButton("Launch Cellpose GUI")
-        self.import_btn = QPushButton("Import Corrections")
+        self.export_btn.setToolTip("Save current segmentation in Cellpose format for external editing")
 
-        correction_buttons_layout.addWidget(self.export_btn)
-        correction_buttons_layout.addWidget(self.launch_gui_btn)
-        correction_buttons_layout.addWidget(self.import_btn)
+        self.import_btn = QPushButton("Import from Cellpose")
+        self.import_btn.setToolTip("Load segmentation that was edited in Cellpose")
 
-        correction_layout.addLayout(correction_buttons_layout)
+        cellpose_buttons_layout.addWidget(self.export_btn)
+        cellpose_buttons_layout.addWidget(self.import_btn)
+        cellpose_layout.addLayout(cellpose_buttons_layout)
 
+        # Add both groups to main layout
         layout.addWidget(correction_group)
+        layout.addWidget(cellpose_group)
 
         # Initially disable buttons
         self.export_btn.setEnabled(False)
@@ -799,27 +806,6 @@ class SegmentationWidget(QWidget):
         scaled = ((scaled - img_min) / (img_max - img_min) * 255).astype(np.uint8)
 
         return scaled
-
-    def launch_cellpose_gui(self):
-        """Launch the Cellpose GUI"""
-        try:
-            import subprocess
-            import sys
-
-            # Launch Cellpose GUI in a separate process
-            subprocess.Popen([
-                sys.executable,
-                "-m",
-                "cellpose",
-                "--gui"
-            ])
-
-        except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Launch Failed",
-                f"Failed to launch Cellpose GUI: {str(e)}"
-            )
 
     def import_corrections(self):
         """Import corrected masks from Cellpose"""

@@ -182,33 +182,52 @@ class PreprocessingWidget(QWidget):
         """Toggle preview mode"""
         self.preview_enabled = enabled
 
-        if enabled:
-            # Store reference to original layer
-            selected = self.viewer.layers.selection.active
-            if not isinstance(selected, Image):
-                QMessageBox.warning(self, "Warning", "Please select an image layer")
-                self.preview_checkbox.setChecked(False)
-                return
-            self.original_layer = selected
+        try:
+            if enabled:
+                # If we don't have a stored original layer, find it
+                if self.original_layer is None:
+                    # First try to get the selected layer
+                    selected = self.viewer.layers.selection.active
+                    if isinstance(selected, Image):
+                        self.original_layer = selected
+                    else:
+                        # If no image is selected, look for the first image layer
+                        for layer in self.viewer.layers:
+                            if isinstance(layer, Image):
+                                self.original_layer = layer
+                                break
 
-            # Create preview layer if needed
-            if self.preview_layer is None:
-                self.preview_layer = self.viewer.add_image(
-                    np.zeros_like(selected.data[0] if selected.data.ndim == 3 else selected.data),
-                    name='Preview',
-                    visible=True
-                )
+                    if self.original_layer is None:
+                        QMessageBox.warning(self, "Warning", "No image layer found")
+                        self.preview_checkbox.setChecked(False)
+                        return
 
-            # Update preview
-            self.update_preview_frame()
-        else:
-            # Remove preview layer
+                # Create preview layer if needed
+                if self.preview_layer is None:
+                    self.preview_layer = self.viewer.add_image(
+                        np.zeros_like(self.original_layer.data[0] if self.original_layer.data.ndim == 3
+                                      else self.original_layer.data),
+                        name='Preview',
+                        visible=True
+                    )
+
+                # Update preview
+                self.update_preview_frame()
+            else:
+                # Remove preview layer
+                if self.preview_layer is not None:
+                    self.viewer.layers.remove(self.preview_layer)
+                    self.preview_layer = None
+
+                # Don't clear original_layer reference - keep it for next toggle
+
+        except Exception as e:
+            logger.error(f"Error toggling preview: {e}")
+            self.preview_checkbox.setChecked(False)
+            self.preview_enabled = False
             if self.preview_layer is not None:
                 self.viewer.layers.remove(self.preview_layer)
                 self.preview_layer = None
-
-            self.original_layer = None
-
     def update_preview_frame(self, event: Optional[Event] = None):
         """Update the preview for the current frame"""
         if not self.preview_enabled or self.original_layer is None:
