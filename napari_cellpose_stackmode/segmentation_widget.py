@@ -119,7 +119,7 @@ class SegmentationWidget(QWidget):
             self._update_ui_state()
 
     @log_operation
-    def _run_stack_segmentation(self, preserve_existing=False):  # Add parameter to match _run_segmentation
+    def _run_stack_segmentation(self, preserve_existing=False):
         """Run segmentation on entire stack with enhanced progress tracking and error handling."""
         if self._processing or self._batch_processing:
             logger.warning("Processing already in progress")
@@ -128,6 +128,10 @@ class SegmentationWidget(QWidget):
         try:
             self._batch_processing = True
             self._update_ui_state()
+
+            # Validate prerequisites
+            if not self._ensure_model_initialized():
+                return
 
             image_layer = self._get_active_image_layer()
             if image_layer is None:
@@ -195,34 +199,16 @@ class SegmentationWidget(QWidget):
             self._last_error = None  # Clear any previous error state
             self._update_ui_state()
 
-    def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
-        """Handle completion of segmentation with proper state updates."""
-        try:
-            logger.debug("Processing segmentation completion")
-
-            # Verify we're in a valid state
-            if not self.data_manager._initialized:
-                raise RuntimeError("Data manager not properly initialized")
-
-            # Update only the current frame's results
-            self.data_manager.segmentation_data = (masks, self._current_frame)
-
-            # Validate stack consistency
-            if not self.data_manager.validate_stack_consistency():
-                raise ValueError("Stack consistency validation failed after segmentation")
-
-            # Update visualization for current frame
-            self.vis_manager.update_tracking_visualization(
-                (masks, self._current_frame)
-            )
-
-            # Update UI
-            self.save_btn.setEnabled(True)
-            self.export_btn.setEnabled(True)
-            self.status_label.setText(f"Frame {self._current_frame + 1} completed successfully")
-
-        except Exception as e:
-            self._on_segmentation_failed(str(e))
+    def _ensure_model_initialized(self) -> bool:
+        """Make sure model is initialized before running segmentation"""
+        if self.segmentation.model is None:
+            try:
+                self._initialize_model()
+                return True
+            except Exception as e:
+                self._on_segmentation_failed(f"Model initialization failed: {str(e)}")
+                return False
+        return True
 
     def _on_segmentation_failed(self, error_msg: str):
         """Enhanced error handling with proper state cleanup."""
@@ -248,7 +234,6 @@ class SegmentationWidget(QWidget):
         # Update button states
         self.run_btn.setEnabled(not is_busy and has_image_layer)
         self.run_stack_btn.setEnabled(not is_busy and has_image_layer)
-        self.save_btn.setEnabled(not is_busy and self.data_manager.segmentation_data is not None)
         self.export_btn.setEnabled(not is_busy and self.data_manager.segmentation_data is not None)
 
         # Update model-related controls
@@ -315,7 +300,6 @@ class SegmentationWidget(QWidget):
             self.vis_manager.update_tracking_visualization((masks, current_frame))
 
             # Enable buttons and update status
-            self.save_btn.setEnabled(True)
             self.export_btn.setEnabled(True)
 
             # Emit completion signal with full stack
@@ -349,7 +333,7 @@ class SegmentationWidget(QWidget):
         state = self.state_manager.state
 
         # Disable buttons during processing
-        processing_buttons = [self.run_btn, self.run_stack_btn, self.save_btn,
+        processing_buttons = [self.run_btn, self.run_stack_btn,  # Removed save_btn
                               self.export_btn, self.import_btn]
 
         for button in processing_buttons:
@@ -357,7 +341,6 @@ class SegmentationWidget(QWidget):
 
         # Enable/disable based on data availability
         has_data = state.full_stack is not None
-        self.save_btn.setEnabled(has_data and not state.is_processing)
         self.export_btn.setEnabled(has_data and not state.is_processing)
 
     def _connect_signals(self):
@@ -379,7 +362,6 @@ class SegmentationWidget(QWidget):
         # Action button signals
         self.run_btn.clicked.connect(self._run_segmentation)
         self.run_stack_btn.clicked.connect(self._run_stack_segmentation)
-        self.save_btn.clicked.connect(self._save_results)
 
         # Viewer layer events
         self.viewer.layers.events.inserted.connect(self._update_button_states)
@@ -436,17 +418,6 @@ class SegmentationWidget(QWidget):
             self.status_label.setText(f"Correction applied. Current cell count: {num_cells}")
         except Exception as e:
             self._on_segmentation_failed(f"Error applying correction: {str(e)}")
-
-    def _ensure_model_initialized(self) -> bool:
-        """Make sure model is initialized before running segmentation"""
-        if self.segmentation.model is None:
-            try:
-                self._initialize_model()
-                return True
-            except Exception as e:
-                self._on_segmentation_failed(f"Model initialization failed: {str(e)}")
-                return False
-        return True
 
     def _setup_ui(self):
         """Create and arrange the widget UI"""
@@ -510,6 +481,7 @@ class SegmentationWidget(QWidget):
         self.gpu_check = QCheckBox("Use GPU")
         self.normalize_check = QCheckBox("Normalize")
         self.compute_diameter_check = QCheckBox("Auto-compute diameter")
+        self.gpu_check.setChecked(True)
         self.normalize_check.setChecked(True)
         self.compute_diameter_check.setChecked(True)
 
@@ -537,11 +509,9 @@ class SegmentationWidget(QWidget):
         buttons_layout = QHBoxLayout()
         self.run_btn = QPushButton("Run Segmentation")
         self.run_stack_btn = QPushButton("Process Stack")
-        self.save_btn = QPushButton("Save Results")
 
         buttons_layout.addWidget(self.run_btn)
         buttons_layout.addWidget(self.run_stack_btn)
-        buttons_layout.addWidget(self.save_btn)
 
         button_layout.addLayout(buttons_layout)
         button_layout.addWidget(self.progress_bar)
@@ -584,7 +554,6 @@ class SegmentationWidget(QWidget):
         layout.addWidget(correction_group)
 
         # Initially disable buttons
-        self.save_btn.setEnabled(False)
         self.export_btn.setEnabled(False)
         self.import_btn.setEnabled(False)
         self._update_button_states()
@@ -658,26 +627,6 @@ class SegmentationWidget(QWidget):
             error_msg = f"Failed to initialize model: {str(e)}"
             logger.error(error_msg)
             QMessageBox.critical(self, "Error", error_msg)
-
-    def _save_results(self):
-        """Save segmentation results"""
-        try:
-            save_dir = QFileDialog.getExistingDirectory(
-                self,
-                "Select Save Directory",
-                str(Path.home())
-            )
-
-            if save_dir:
-                self.segmentation.save_results(Path(save_dir))
-                QMessageBox.information(
-                    self,
-                    "Success",
-                    "Results saved successfully"
-                )
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save results: {str(e)}")
 
     def _get_active_image_layer(self) -> Optional[Image]:
         """Get the currently active image layer"""
