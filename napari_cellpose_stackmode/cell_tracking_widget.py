@@ -40,22 +40,8 @@ class CellTrackingWidget(QWidget):
         # Then connect signals
         self.connect_signals()
 
-    def connect_signals(self):
-        """Connect all parameter control signals"""
-        # Make sure all UI elements exist before connecting
-        if hasattr(self, 'overlap_spin'):
-            self.overlap_spin.valueChanged.connect(self.update_parameters)
-        if hasattr(self, 'displacement_spin'):
-            self.displacement_spin.valueChanged.connect(self.update_parameters)
-        if hasattr(self, 'cell_size_spin'):
-            self.cell_size_spin.valueChanged.connect(self.update_parameters)
-        if hasattr(self, 'gap_closing_check'):
-            self.gap_closing_check.stateChanged.connect(self.update_parameters)
-        if hasattr(self, 'gap_frames_spin'):
-            self.gap_frames_spin.valueChanged.connect(self.update_parameters)
-
     def setup_ui(self):
-        """Initialize the enhanced user interface"""
+        """Initialize the user interface"""
         layout = QVBoxLayout()
         self.setLayout(layout)
 
@@ -64,7 +50,7 @@ class CellTrackingWidget(QWidget):
         title.setStyleSheet("font-weight: bold; font-size: 12px;")
         layout.addWidget(title)
 
-        # Parameters section
+        # Parameters section with all the existing parameter controls
         param_group = QFormLayout()
 
         # Create all UI elements and store them as instance variables
@@ -104,21 +90,12 @@ class CellTrackingWidget(QWidget):
 
         layout.addLayout(param_group)
 
-        # Button layout
+        # Button layout - simplified to only include track cells button
         button_layout = QHBoxLayout()
 
         self.track_btn = QPushButton("Track Cells")
         self.track_btn.clicked.connect(self.run_tracking)
         button_layout.addWidget(self.track_btn)
-
-        self.save_btn = QPushButton("Save Tracked Cells")
-        self.save_btn.clicked.connect(self.save_tracking_results)
-        self.save_btn.setEnabled(False)
-        button_layout.addWidget(self.save_btn)
-
-        self.load_btn = QPushButton("Load Tracked Cells")
-        self.load_btn.clicked.connect(self.load_tracking_results)
-        button_layout.addWidget(self.load_btn)
 
         self.reset_btn = QPushButton("Reset Parameters")
         self.reset_btn.clicked.connect(self.reset_parameters)
@@ -135,7 +112,20 @@ class CellTrackingWidget(QWidget):
 
         layout.addStretch()
 
-    # In cell_tracking_widget.py, modify the run_tracking method:
+    def connect_signals(self):
+        """Connect all parameter control signals"""
+        # Make sure all UI elements exist before connecting
+        if hasattr(self, 'overlap_spin'):
+            self.overlap_spin.valueChanged.connect(self.update_parameters)
+        if hasattr(self, 'displacement_spin'):
+            self.displacement_spin.valueChanged.connect(self.update_parameters)
+        if hasattr(self, 'cell_size_spin'):
+            self.cell_size_spin.valueChanged.connect(self.update_parameters)
+        if hasattr(self, 'gap_closing_check'):
+            self.gap_closing_check.stateChanged.connect(self.update_parameters)
+        if hasattr(self, 'gap_frames_spin'):
+            self.gap_frames_spin.valueChanged.connect(self.update_parameters)
+
     def run_tracking(self):
         """Run cell tracking with current parameters"""
         selected = self.viewer.layers.selection.active
@@ -181,6 +171,7 @@ class CellTrackingWidget(QWidget):
 
         finally:
             self._set_controls_enabled(True)
+
     def save_tracking_results(self):
         """Save the current tracking results"""
         try:
@@ -359,6 +350,7 @@ class CellTrackingWidget(QWidget):
             error_msg = f"Tracking batch processing failed: {str(e)}"
             logger.error(error_msg, exc_info=True)
             raise
+
     def _load_image_stack(self, path: Path) -> np.ndarray:
         """Load image stack from file"""
         try:
