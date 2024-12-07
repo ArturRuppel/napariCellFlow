@@ -26,6 +26,77 @@ class VisualizationManager:
         # Connect to layer removal event
         self.viewer.layers.events.removed.connect(self._handle_layer_removal)
 
+    def update_tracking_visualization(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> None:
+        """Update tracking visualization with layer preservation."""
+        if self._updating:
+            logger.debug("VisualizationManager: Update cancelled - already updating")
+            return
+
+        try:
+            self._updating = True
+            with self._layer_lock:
+                # Handle single frame or full stack update
+                update_data = self._prepare_update_data(data)
+
+                # Update or create layer
+                with self.viewer.events.blocker_all():
+                    if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
+                        self.tracking_layer.data = update_data
+                        self.tracking_layer.refresh()
+                    else:
+                        self.tracking_layer = self.viewer.add_labels(
+                            update_data,
+                            name='Segmentation',
+                            opacity=0.5,
+                            visible=True
+                        )
+
+        except Exception as e:
+            logger.error(f"VisualizationManager: Error updating visualization: {e}")
+            raise
+        finally:
+            self._updating = False
+
+    def _prepare_update_data(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> np.ndarray:
+        """Prepare data for visualization update."""
+        if isinstance(data, tuple):
+            frame_data, frame_index = data
+            num_frames = self.data_manager._num_frames
+
+            if self.tracking_layer is None:
+                # Create new full-sized stack
+                update_data = np.zeros((num_frames, *frame_data.shape), dtype=frame_data.dtype)
+                update_data[frame_index] = frame_data
+            else:
+                # Update existing stack
+                update_data = self._update_existing_stack(frame_data, frame_index, num_frames)
+        else:
+            # Handle full stack update
+            update_data = self._prepare_full_stack(data)
+
+        return update_data
+
+    def _update_existing_stack(self, frame_data: np.ndarray, frame_index: int, num_frames: int) -> np.ndarray:
+        """Update existing stack with new frame data."""
+        if self.tracking_layer.data.shape[0] < num_frames:
+            new_data = np.zeros((num_frames, *frame_data.shape), dtype=frame_data.dtype)
+            new_data[:self.tracking_layer.data.shape[0]] = self.tracking_layer.data
+            update_data = new_data
+        else:
+            update_data = self.tracking_layer.data.copy()
+        update_data[frame_index] = frame_data
+        return update_data
+
+    def _prepare_full_stack(self, data: np.ndarray) -> np.ndarray:
+        """Prepare full stack data for update."""
+        if data.ndim == 2:
+            data = data[np.newaxis, ...]
+        if data.shape[0] < self.data_manager._num_frames:
+            new_data = np.zeros((self.data_manager._num_frames, *data.shape[1:]), dtype=data.dtype)
+            new_data[:data.shape[0]] = data
+            return new_data
+        return data.copy()
+
     def _handle_layer_removal(self, event):
         """Handle layer removal events safely."""
         layer = event.value
@@ -69,76 +140,6 @@ class VisualizationManager:
                 return self.tracking_layer
             return None
 
-    def update_tracking_visualization(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> None:
-        """Update tracking visualization with layer preservation."""
-        if self._updating:
-            logger.debug("VisualizationManager: Update cancelled - already updating")
-            return
-
-        try:
-            self._updating = True
-            with self._layer_lock:
-                logger.debug("VisualizationManager: Starting visualization update")
-
-                # Handle input data
-                if isinstance(data, tuple):
-                    frame_data, frame_index = data
-                    logger.debug(f"Received frame update: frame_index={frame_index}, shape={frame_data.shape}")
-
-                    # Get the correct number of frames from data manager
-                    num_frames = self.data_manager._num_frames
-                    logger.debug(f"Total frames from data manager: {num_frames}")
-
-                    if self.tracking_layer is None:
-                        # Create full-sized stack matching data manager size
-                        shape = (num_frames, *frame_data.shape)
-                        logger.debug(f"Creating new tracking layer with shape {shape}")
-                        update_data = np.zeros(shape, dtype=frame_data.dtype)
-                        update_data[frame_index] = frame_data
-                    else:
-                        # If existing layer is too small, create new array
-                        if self.tracking_layer.data.shape[0] < num_frames:
-                            logger.debug(f"Resizing tracking layer from {self.tracking_layer.data.shape} to {(num_frames, *frame_data.shape)}")
-                            new_data = np.zeros((num_frames, *frame_data.shape), dtype=frame_data.dtype)
-                            # Copy existing data
-                            new_data[:self.tracking_layer.data.shape[0]] = self.tracking_layer.data
-                            update_data = new_data
-                        else:
-                            update_data = self.tracking_layer.data.copy()
-                        update_data[frame_index] = frame_data
-                else:
-                    # For full stack updates, ensure correct size
-                    if data.ndim == 2:
-                        data = data[np.newaxis, ...]
-                    if data.shape[0] < self.data_manager._num_frames:
-                        logger.debug(f"Padding data from {data.shape} to {(self.data_manager._num_frames, *data.shape[1:])}")
-                        new_data = np.zeros((self.data_manager._num_frames, *data.shape[1:]), dtype=data.dtype)
-                        new_data[:data.shape[0]] = data
-                        update_data = new_data
-                    else:
-                        update_data = data.copy()
-
-                logger.debug(f"Update data shape: {update_data.shape}")
-                logger.debug(f"Update unique values: {np.unique(update_data)}")
-
-                # Update or create layer
-                with self.viewer.events.blocker_all():
-                    if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
-                        self.tracking_layer.data = update_data
-                        self.tracking_layer.refresh()
-                    else:
-                        self.tracking_layer = self.viewer.add_labels(
-                            update_data,
-                            name='Segmentation',
-                            opacity=0.5,
-                            visible=True
-                        )
-
-        except Exception as e:
-            logger.error(f"VisualizationManager: Error updating visualization: {e}", exc_info=True)
-            raise
-        finally:
-            self._updating = False
     def _update_full_stack(self, stack_data: np.ndarray) -> None:
         """Update full stack while preserving layer."""
         logger.debug(f"Updating full stack with shape {stack_data.shape}")
