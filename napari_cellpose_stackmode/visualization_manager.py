@@ -80,24 +80,43 @@ class VisualizationManager:
             with self._layer_lock:
                 logger.debug("VisualizationManager: Starting visualization update")
 
-                # Get existing data
-                if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
-                    current_data = self.tracking_layer.data
-                    logger.debug(f"Current tracking data shape: {current_data.shape}")
-                    logger.debug(f"Current unique values: {np.unique(current_data)}")
-
                 # Handle input data
                 if isinstance(data, tuple):
                     frame_data, frame_index = data
-                    if self.tracking_layer is not None:
-                        update_data = self.tracking_layer.data.copy()
-                        update_data[frame_index] = frame_data
-                    else:
-                        shape = (frame_index + 1, *frame_data.shape)
+                    logger.debug(f"Received frame update: frame_index={frame_index}, shape={frame_data.shape}")
+
+                    # Get the correct number of frames from data manager
+                    num_frames = self.data_manager._num_frames
+                    logger.debug(f"Total frames from data manager: {num_frames}")
+
+                    if self.tracking_layer is None:
+                        # Create full-sized stack matching data manager size
+                        shape = (num_frames, *frame_data.shape)
+                        logger.debug(f"Creating new tracking layer with shape {shape}")
                         update_data = np.zeros(shape, dtype=frame_data.dtype)
                         update_data[frame_index] = frame_data
+                    else:
+                        # If existing layer is too small, create new array
+                        if self.tracking_layer.data.shape[0] < num_frames:
+                            logger.debug(f"Resizing tracking layer from {self.tracking_layer.data.shape} to {(num_frames, *frame_data.shape)}")
+                            new_data = np.zeros((num_frames, *frame_data.shape), dtype=frame_data.dtype)
+                            # Copy existing data
+                            new_data[:self.tracking_layer.data.shape[0]] = self.tracking_layer.data
+                            update_data = new_data
+                        else:
+                            update_data = self.tracking_layer.data.copy()
+                        update_data[frame_index] = frame_data
                 else:
-                    update_data = data.copy()
+                    # For full stack updates, ensure correct size
+                    if data.ndim == 2:
+                        data = data[np.newaxis, ...]
+                    if data.shape[0] < self.data_manager._num_frames:
+                        logger.debug(f"Padding data from {data.shape} to {(self.data_manager._num_frames, *data.shape[1:])}")
+                        new_data = np.zeros((self.data_manager._num_frames, *data.shape[1:]), dtype=data.dtype)
+                        new_data[:data.shape[0]] = data
+                        update_data = new_data
+                    else:
+                        update_data = data.copy()
 
                 logger.debug(f"Update data shape: {update_data.shape}")
                 logger.debug(f"Update unique values: {np.unique(update_data)}")
@@ -115,15 +134,11 @@ class VisualizationManager:
                             visible=True
                         )
 
-                # Ensure layer visibility
-                self.tracking_layer.visible = True
-
         except Exception as e:
             logger.error(f"VisualizationManager: Error updating visualization: {e}", exc_info=True)
             raise
         finally:
             self._updating = False
-            logger.debug("VisualizationManager: Update complete")
     def _update_full_stack(self, stack_data: np.ndarray) -> None:
         """Update full stack while preserving layer."""
         logger.debug(f"Updating full stack with shape {stack_data.shape}")

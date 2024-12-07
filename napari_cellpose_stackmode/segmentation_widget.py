@@ -53,7 +53,6 @@ class SegmentationWidget(QWidget):
         self._update_ui_state()
 
     @log_operation
-    @log_operation
     def _run_segmentation(self, preserve_existing=False):
         """Run segmentation on current frame with enhanced error handling."""
         if self._processing:
@@ -112,6 +111,7 @@ class SegmentationWidget(QWidget):
             self._processing = False
             self._last_error = None
             self._update_ui_state()
+
     @log_operation
     def _run_stack_segmentation(self, preserve_existing=False):
         """Run segmentation on entire stack with enhanced progress tracking and error handling."""
@@ -134,9 +134,18 @@ class SegmentationWidget(QWidget):
             if image_layer.data.ndim < 3:
                 raise ValueError("Selected layer is not a stack")
 
-            # Initialize state
+            # Add these debug logs
+            logger.debug(f"Image layer shape: {image_layer.data.shape}")
             num_frames = image_layer.data.shape[0]
+            logger.debug(f"Detected {num_frames} frames from image data")
+
+            # Initialize state with correct number of frames
+            num_frames = image_layer.data.shape[0]
+            logger.debug(f"Stack segmentation starting with {num_frames} frames")
+
+            # Always reinitialize data manager with correct number of frames
             self.data_manager.initialize_stack(num_frames)
+            logger.debug("Data manager initialized")
 
             # Create progress dialog
             progress = QProgressDialog("Processing image stack...", "Cancel", 0, num_frames, self)
@@ -144,6 +153,7 @@ class SegmentationWidget(QWidget):
 
             try:
                 for frame_idx in range(num_frames):
+                    logger.debug(f"Processing frame {frame_idx}/{num_frames}")
                     if progress.wasCanceled():
                         raise InterruptedError("Processing canceled by user")
 
@@ -154,18 +164,23 @@ class SegmentationWidget(QWidget):
                     # Process frame
                     self._current_frame = frame_idx
                     frame_data = image_layer.data[frame_idx]
+                    logger.debug(f"Frame data shape: {frame_data.shape}")
 
                     try:
                         # Run segmentation on frame
                         masks, metadata = self.segmentation.segment_frame(frame_data)
+                        logger.debug(f"Segmentation complete for frame {frame_idx}")
+                        logger.debug(f"Masks shape: {masks.shape}")
 
                         # Update data manager
                         self.data_manager.segmentation_data = (masks, frame_idx)
+                        logger.debug(f"Data manager updated for frame {frame_idx}")
 
                         # Update visualization
                         self.vis_manager.update_tracking_visualization(
                             (masks, frame_idx)
                         )
+                        logger.debug(f"Visualization updated for frame {frame_idx}")
 
                     except Exception as e:
                         logger.error(f"Error processing frame {frame_idx}: {e}")
@@ -190,9 +205,8 @@ class SegmentationWidget(QWidget):
 
         finally:
             self._batch_processing = False
-            self._last_error = None  # Clear any previous error state
+            self._last_error = None
             self._update_ui_state()
-
     def _ensure_model_initialized(self) -> bool:
         """Make sure model is initialized before running segmentation"""
         if self.segmentation.model is None:

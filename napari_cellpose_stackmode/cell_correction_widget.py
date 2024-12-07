@@ -311,6 +311,10 @@ class CellCorrectionWidget(QWidget):
             full_stack = self.vis_manager.tracking_layer.data.copy()
             logger.debug(f"Full stack unique values before: {np.unique(full_stack)}")
 
+            # Calculate next cell ID based on the maximum value in the entire stack
+            self.next_cell_id = int(full_stack.max()) + 1
+            logger.debug(f"Using cell ID: {self.next_cell_id}")
+
             # Create new cell mask
             frame_shape = full_stack.shape[1:]
             new_cell_mask = np.zeros(frame_shape, dtype=np.uint8)
@@ -340,8 +344,10 @@ class CellCorrectionWidget(QWidget):
             self.data_manager.segmentation_data = full_stack
 
             # Update UI state
-            self.next_cell_id = max(self.next_cell_id + 1, int(full_stack.max()) + 1)
-            self.status_label.setText(f"Added new cell {self.next_cell_id - 1}")
+            self.status_label.setText(f"Added new cell {self.next_cell_id}")
+
+            # Increment next_cell_id for the next drawing
+            self.next_cell_id += 1
 
             # Verify data consistency
             if self.vis_manager.tracking_layer is not None:

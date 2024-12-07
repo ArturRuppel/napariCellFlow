@@ -31,6 +31,8 @@ class DataManager:
                 self._frame_states = {i: {'modified': False, 'last_update': None} for i in range(num_frames)}
                 self._initialized = True
                 logger.debug("Stack initialization complete")
+                logger.debug(f"Stack initialized with shape ({num_frames}, None, None)")
+
             except Exception as e:
                 logger.error(f"Failed to initialize stack: {e}")
                 raise ValueError(f"Stack initialization failed: {str(e)}")
@@ -78,32 +80,32 @@ class DataManager:
                 self._updating = True
                 logger.debug("DataManager: Starting segmentation data update")
                 logger.debug(f"DataManager: Input type: {type(value)}")
-                if isinstance(value, np.ndarray):
-                    logger.debug(f"DataManager: Input shape: {value.shape}")
-                    logger.debug(f"DataManager: Input unique values: {np.unique(value)}")
+                logger.debug(f"DataManager: Current num_frames: {self._num_frames}")
 
                 # Handle single frame update
                 if isinstance(value, tuple) and len(value) == 2:
                     frame_data, frame_index = value
                     logger.debug(f"DataManager: Updating single frame {frame_index}")
+                    logger.debug(f"DataManager: Frame data shape: {frame_data.shape}")
+
+                    # Check frame index before updating
+                    if frame_index >= self._num_frames:
+                        logger.error(f"DataManager: Frame index {frame_index} exceeds number of frames {self._num_frames}")
+                        raise ValueError(f"Frame index {frame_index} out of bounds for stack size {self._num_frames}")
 
                     if self._segmentation_data is None:
+                        logger.debug("DataManager: Initializing segmentation data array")
                         shape = (self._num_frames, *frame_data.shape)
+                        logger.debug(f"DataManager: Creating array with shape {shape}")
                         self._segmentation_data = np.zeros(shape, dtype=frame_data.dtype)
-                        self._full_stack = self._segmentation_data.copy()
 
                     # Update frame
-                    if frame_index < self._num_frames:
-                        self._segmentation_data[frame_index] = frame_data.copy()
-                        self._full_stack[frame_index] = frame_data.copy()
-                        self._frame_states[frame_index] = {
-                            'modified': True,
-                            'last_update': np.datetime64('now')
-                        }
-                        logger.debug("DataManager: Frame update complete")
-                    else:
-                        logger.error(f"DataManager: Frame index {frame_index} out of bounds")
-                        raise ValueError(f"Frame index {frame_index} out of bounds")
+                    self._segmentation_data[frame_index] = frame_data.copy()
+                    self._frame_states[frame_index] = {
+                        'modified': True,
+                        'last_update': np.datetime64('now')
+                    }
+                    logger.debug("DataManager: Frame update complete")
 
                 # Handle full stack update
                 else:
@@ -111,11 +113,14 @@ class DataManager:
                     if value is not None:
                         if value.ndim == 2:
                             value = value[np.newaxis, ...]
+                        logger.debug(f"DataManager: Full stack shape: {value.shape}")
                         self._segmentation_data = value.copy()
-                        self._full_stack = self._segmentation_data.copy()
+                        self._frame_states = {
+                            i: {'modified': False, 'last_update': np.datetime64('now')}
+                            for i in range(value.shape[0])
+                        }
                     else:
                         self._segmentation_data = None
-                        self._full_stack = None
                         self._frame_states.clear()
 
             except Exception as e:
