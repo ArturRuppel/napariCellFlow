@@ -78,64 +78,54 @@ class CellCorrectionWidget(QWidget):
         self._setup_shortcuts()
         QApplication.instance().installEventFilter(self)
 
-    # In cell_correction_widget.py
-
     def eventFilter(self, watched_object, event):
         """Global event filter to catch key events regardless of focus"""
-        try:
-            if event.type() == event.KeyPress:
-                if event.key() == Qt.Key_Control:
-                    logger.debug("CellCorrection: Ctrl key pressed")
-                    self.ctrl_pressed = True
-                    self._update_drawing_state()
-                    return False  # Don't consume the event
-            elif event.type() == event.KeyRelease:
-                if event.key() == Qt.Key_Control:
-                    logger.debug("CellCorrection: Ctrl key released")
-                    logger.debug(f"CellCorrection: Current drawing state - is_drawing: {self.is_drawing}, drawing_started: {self.drawing_started}")
-
-                    # Only handle Ctrl release if we're not in the middle of drawing
-                    if not self.drawing_started:
-                        self.ctrl_pressed = False
-                        self._update_drawing_state()
-                    else:
-                        logger.debug("CellCorrection: Ignoring Ctrl release while drawing active")
-
-                    return False  # Don't consume the event
+        if event.type() not in (event.KeyPress, event.KeyRelease):
             return super().eventFilter(watched_object, event)
+
+        if event.key() != Qt.Key_Control:
+            return False
+
+        try:
+            is_press = event.type() == event.KeyPress
+            logger.debug(f"CellCorrection: Ctrl key {'pressed' if is_press else 'released'}")
+
+            # Only update state if we're not actively drawing
+            if not self.drawing_started:
+                self.ctrl_pressed = is_press
+                self._update_drawing_state()
+
+            return False  # Don't consume the event
+
         except Exception as e:
-            logger.error(f"CellCorrection: Error in event filter: {e}", exc_info=True)
+            logger.error(f"CellCorrection: Error handling Ctrl key: {e}")
             return False
 
     def _update_drawing_state(self):
         """Update drawing state with proper synchronization."""
         try:
-            logger.debug("CellCorrection: Updating drawing state")
-            logger.debug(f"CellCorrection: Current state - toggle_state: {self.toggle_state}, ctrl_pressed: {self.ctrl_pressed}")
-
-            # Calculate new drawing state
             new_drawing_state = self.toggle_state or self.ctrl_pressed
 
             # Only update if state actually changes
-            if new_drawing_state != self.is_drawing:
-                logger.debug(f"CellCorrection: Drawing state changing from {self.is_drawing} to {new_drawing_state}")
-                self.is_drawing = new_drawing_state
+            if new_drawing_state == self.is_drawing:
+                return
 
-                # Only update UI if we're not actively drawing
-                if not self.drawing_started:
-                    with self.viewer.events.blocker_all():
-                        self._update_ui_state()
-                        if not new_drawing_state:  # Only clear when exiting drawing mode
-                            self._clear_drawing()
+            logger.debug(f"CellCorrection: Drawing state changing from {self.is_drawing} to {new_drawing_state}")
+            self.is_drawing = new_drawing_state
+
+            # Only update UI if we're not actively drawing
+            if not self.drawing_started:
+                with self.viewer.events.blocker_all():
+                    self._update_ui_state()
+                    if not new_drawing_state:
+                        self._clear_drawing()
 
             # Single refresh at the end if needed
-            if self.masks_layer is not None and self.masks_layer in self.viewer.layers:
-                logger.debug("CellCorrection: Refreshing masks layer")
+            if self.masks_layer and self.masks_layer in self.viewer.layers:
                 self.masks_layer.refresh()
 
         except Exception as e:
-            logger.error(f"CellCorrection: Error updating drawing state: {e}", exc_info=True)
-
+            logger.error(f"CellCorrection: Error updating drawing state: {e}")
     def _clear_drawing(self):
         try:
             logger.debug("CellCorrection: Starting drawing clear")
@@ -295,73 +285,53 @@ class CellCorrectionWidget(QWidget):
             self._clear_drawing()
             return
 
-        try:
-            if self._updating:
-                return
+        if self._updating:
+            return
 
+        try:
             self._updating = True
             current_frame = int(self.viewer.dims.point[0])
-            logger.debug(f"CellCorrection: Finishing drawing on frame {current_frame}")
 
-            # Get existing data from visualization manager first
-            if self.vis_manager.tracking_layer is None:
+            if not self.vis_manager.tracking_layer:
                 raise ValueError("No tracking layer available")
 
             # Get a deep copy of the full stack
             full_stack = self.vis_manager.tracking_layer.data.copy()
-            logger.debug(f"Full stack unique values before: {np.unique(full_stack)}")
-
-            # Calculate next cell ID based on the maximum value in the entire stack
             self.next_cell_id = int(full_stack.max()) + 1
-            logger.debug(f"Using cell ID: {self.next_cell_id}")
 
             # Create new cell mask
             frame_shape = full_stack.shape[1:]
-            new_cell_mask = np.zeros(frame_shape, dtype=np.uint8)
-            points = np.array(self.drawing_points + [self.start_point])
-            points = np.clip(points, 0, np.array(frame_shape) - 1).astype(np.int32)
-            cv2.fillPoly(new_cell_mask, [points[:, ::-1]], 1)
+            new_cell_mask = self._create_cell_mask(frame_shape)
 
-            # Get the current frame data
+            # Update current frame data
             current_frame_data = full_stack[current_frame].copy()
-
-            # Only update empty areas
             empty_mask = (current_frame_data == 0)
             add_mask = np.logical_and(new_cell_mask > 0, empty_mask)
-
-            # Update only the new cell area in the current frame
             current_frame_data[add_mask] = self.next_cell_id
-
-            # Put the updated frame back into the stack
             full_stack[current_frame] = current_frame_data
 
-            logger.debug(f"Full stack unique values after: {np.unique(full_stack)}")
-
-            # Update through visualization manager
+            # Update visualization and data
             self.vis_manager.update_tracking_visualization(full_stack)
-
-            # Update data manager
             self.data_manager.segmentation_data = full_stack
-
-            # Update UI state
             self.status_label.setText(f"Added new cell {self.next_cell_id}")
-
-            # Increment next_cell_id for the next drawing
             self.next_cell_id += 1
 
-            # Verify data consistency
-            if self.vis_manager.tracking_layer is not None:
-                final_data = self.vis_manager.tracking_layer.data
-                logger.debug(f"Final layer unique values: {np.unique(final_data)}")
-
         except Exception as e:
-            logger.error(f"CellCorrection: Error finishing drawing: {e}", exc_info=True)
+            logger.error(f"CellCorrection: Error finishing drawing: {e}")
             raise
         finally:
             self._updating = False
             self.drawing_started = False
             self.start_point = None
             self._clear_drawing()
+
+    def _create_cell_mask(self, frame_shape):
+        """Create a mask for the new cell"""
+        new_cell_mask = np.zeros(frame_shape, dtype=np.uint8)
+        points = np.array(self.drawing_points + [self.start_point])
+        points = np.clip(points, 0, np.array(frame_shape) - 1).astype(np.int32)
+        cv2.fillPoly(new_cell_mask, [points[:, ::-1]], 1)
+        return new_cell_mask
     @log_operation
     def _handle_layer_added(self, event):
         """Handle when a new layer is added to the viewer"""
