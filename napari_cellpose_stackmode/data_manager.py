@@ -36,14 +36,12 @@ class DataManager:
                 raise ValueError(f"Stack initialization failed: {str(e)}")
 
     @property
-    @log_operation
     def preprocessed_data(self) -> Optional[np.ndarray]:
         """Get the preprocessed data."""
         with self._lock:
             return self._preprocessed_data
 
     @preprocessed_data.setter
-    @log_operation
     def preprocessed_data(self, data: Optional[np.ndarray]):
         """Set the preprocessed data with validation."""
         if self._updating:
@@ -63,65 +61,69 @@ class DataManager:
                 self._updating = False
 
     @property
-    @log_operation
     def segmentation_data(self) -> Optional[np.ndarray]:
         """Get the segmentation data."""
         with self._lock:
             return self._segmentation_data
 
     @segmentation_data.setter
-    @log_operation
     def segmentation_data(self, value: Union[np.ndarray, Tuple[np.ndarray, int]]):
-        """
-        Set the segmentation data with enhanced frame preservation.
-
-        Args:
-            value: Either full stack (np.ndarray) or tuple of (frame_data, frame_index)
-        """
+        """Set segmentation data with robust frame preservation."""
         if self._updating:
-            logger.debug("Segmentation data update cancelled - updating in progress")
+            logger.debug("DataManager: Update cancelled - already updating")
             return
 
         with self._lock:
             try:
                 self._updating = True
+                logger.debug("DataManager: Starting segmentation data update")
+                logger.debug(f"DataManager: Input type: {type(value)}")
+                if isinstance(value, np.ndarray):
+                    logger.debug(f"DataManager: Input shape: {value.shape}")
+                    logger.debug(f"DataManager: Input unique values: {np.unique(value)}")
 
-                # Handle single frame updates
+                # Handle single frame update
                 if isinstance(value, tuple) and len(value) == 2:
                     frame_data, frame_index = value
-                    self._update_single_frame(frame_data, frame_index)
-                    return
+                    logger.debug(f"DataManager: Updating single frame {frame_index}")
 
-                # Handle full stack updates
-                if value is not None:
-                    if not isinstance(value, np.ndarray):
-                        raise ValueError("Segmentation data must be a numpy array")
-
-                    # Initialize if needed
                     if self._segmentation_data is None:
-                        if not self._initialized:
-                            raise RuntimeError("Must call initialize_stack before first update")
-                        shape = (self._num_frames, *value.shape) if value.ndim == 2 else value.shape
-                        self._segmentation_data = np.zeros(shape, dtype=value.dtype)
+                        shape = (self._num_frames, *frame_data.shape)
+                        self._segmentation_data = np.zeros(shape, dtype=frame_data.dtype)
+                        self._full_stack = self._segmentation_data.copy()
 
-                    # Validate shape consistency
-                    if value.shape != self._segmentation_data.shape:
-                        raise ValueError(
-                            f"Shape mismatch: expected {self._segmentation_data.shape}, "
-                            f"got {value.shape}"
-                        )
+                    # Update frame
+                    if frame_index < self._num_frames:
+                        self._segmentation_data[frame_index] = frame_data.copy()
+                        self._full_stack[frame_index] = frame_data.copy()
+                        self._frame_states[frame_index] = {
+                            'modified': True,
+                            'last_update': np.datetime64('now')
+                        }
+                        logger.debug("DataManager: Frame update complete")
+                    else:
+                        logger.error(f"DataManager: Frame index {frame_index} out of bounds")
+                        raise ValueError(f"Frame index {frame_index} out of bounds")
 
-                    # Update the full stack while preserving modified frames
-                    self._update_full_stack(value)
+                # Handle full stack update
                 else:
-                    self._segmentation_data = None
-                    self._frame_states = {}
+                    logger.debug("DataManager: Updating full stack")
+                    if value is not None:
+                        if value.ndim == 2:
+                            value = value[np.newaxis, ...]
+                        self._segmentation_data = value.copy()
+                        self._full_stack = self._segmentation_data.copy()
+                    else:
+                        self._segmentation_data = None
+                        self._full_stack = None
+                        self._frame_states.clear()
 
             except Exception as e:
-                logger.error(f"Error updating segmentation data: {e}")
+                logger.error(f"DataManager: Error updating segmentation data: {e}", exc_info=True)
                 raise
             finally:
                 self._updating = False
+                logger.debug("DataManager: Update complete")
 
     def _update_single_frame(self, frame_data: np.ndarray, frame_index: int) -> None:
         """Update a single frame while preserving others."""
@@ -131,25 +133,33 @@ class DataManager:
         if frame_index >= self._num_frames:
             raise ValueError(f"Frame index {frame_index} exceeds stack size {self._num_frames}")
 
-        if self._segmentation_data is None:
-            # Initialize with proper shape
-            self._segmentation_data = np.zeros((self._num_frames, *frame_data.shape), dtype=frame_data.dtype)
+        with self._lock:
+            try:
+                # Initialize if needed
+                if self._segmentation_data is None:
+                    self._segmentation_data = np.zeros((self._num_frames, *frame_data.shape), dtype=frame_data.dtype)
 
-        # Validate frame shape
-        if frame_data.shape != self._segmentation_data.shape[1:]:
-            raise ValueError(
-                f"Frame shape mismatch: expected {self._segmentation_data.shape[1:]}, "
-                f"got {frame_data.shape}"
-            )
+                # Validate frame shape
+                if frame_data.shape != self._segmentation_data.shape[1:]:
+                    raise ValueError(
+                        f"Frame shape mismatch: expected {self._segmentation_data.shape[1:]}, "
+                        f"got {frame_data.shape}"
+                    )
 
-        # Update the frame
-        self._segmentation_data[frame_index] = frame_data
-        self._frame_states[frame_index] = {
-            'modified': True,
-            'last_update': np.datetime64('now')
-        }
+                # Update the frame
+                self._segmentation_data[frame_index] = frame_data.copy()  # Make explicit copy
+                self._frame_states[frame_index] = {
+                    'modified': True,
+                    'last_update': np.datetime64('now')
+                }
 
-        logger.debug(f"Updated frame {frame_index}")
+                logger.debug(f"Updated frame {frame_index}")
+                logger.debug(f"Updated frame unique values: {np.unique(frame_data)}")
+                logger.debug(f"Full stack unique values: {np.unique(self._segmentation_data)}")
+
+            except Exception as e:
+                logger.error(f"Error updating frame: {e}")
+                raise
 
     def _update_full_stack(self, new_stack: np.ndarray) -> None:
         """Update the full stack while preserving modified frames."""
@@ -180,7 +190,6 @@ class DataManager:
             return self._tracked_data
 
     @tracked_data.setter
-    @log_operation
     def tracked_data(self, data: Optional[np.ndarray]):
         """Set the tracked data with validation."""
         if self._updating:

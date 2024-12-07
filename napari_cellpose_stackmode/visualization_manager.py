@@ -1,4 +1,5 @@
 import logging
+from threading import Lock
 from typing import Optional, Tuple, Union
 import numpy as np
 import napari
@@ -19,49 +20,166 @@ class VisualizationManager:
         self.tracking_layer = None
         self.overlay_layer = None
         self._updating = False
-        self._current_dims = None  # Track current data dimensions
+        self._current_dims = None
+        self._layer_lock = Lock()  # Add thread safety
 
         # Connect to layer removal event
         self.viewer.layers.events.removed.connect(self._handle_layer_removal)
 
     def _handle_layer_removal(self, event):
-        """Handle layer removal events"""
-        if event.value == self.tracking_layer:
-            logger.debug("Segmentation layer was removed")
-            self.tracking_layer = None
-            self._current_dims = None
+        """Handle layer removal events safely."""
+        layer = event.value
+        if layer == self.tracking_layer:
+            logger.debug("VisualizationManager: Tracking layer was removed")
+            with self._layer_lock:
+                if layer not in self.viewer.layers:
+                    self.tracking_layer = None
+                    self._current_dims = None
 
-    @log_operation
+    def _create_tracking_layer(self, data: np.ndarray) -> "napari.layers.Labels":
+        """Create or update tracking layer safely."""
+        try:
+            with self.viewer.events.blocker_all():
+                with self._layer_lock:
+                    # Always try to update existing layer first
+                    if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
+                        logger.debug("VisualizationManager: Updating existing tracking layer")
+                        self.tracking_layer.data = data
+                        self.tracking_layer.refresh()
+                        return self.tracking_layer
+
+                    # Create new layer only if necessary
+                    logger.debug("VisualizationManager: Creating new tracking layer")
+                    layer = self.viewer.add_labels(
+                        data,
+                        name='Segmentation',
+                        opacity=0.5,
+                        visible=True
+                    )
+                    self.tracking_layer = layer
+                    return layer
+        except Exception as e:
+            logger.error(f"Error creating tracking layer: {e}")
+            raise
+
+    def get_current_tracking_layer(self) -> Optional["napari.layers.Labels"]:
+        """Get current tracking layer with validation."""
+        with self._layer_lock:
+            if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
+                return self.tracking_layer
+            return None
+
     def update_tracking_visualization(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> None:
-        """Update the tracking visualization with new data."""
+        """Update tracking visualization with layer preservation."""
         if self._updating:
-            logger.debug("Visualization update cancelled - updating in progress")
+            logger.debug("VisualizationManager: Update cancelled - already updating")
             return
 
         try:
             self._updating = True
-            logger.debug(f"Updating visualization with data type: {type(data)}")
+            with self._layer_lock:
+                logger.debug("VisualizationManager: Starting visualization update")
 
-            # Handle input data
-            if isinstance(data, tuple):
-                frame_data, frame_index = data
-                self._update_single_frame(frame_data, frame_index)
-            else:
-                self._update_full_stack(data)
+                # Get existing data
+                if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
+                    current_data = self.tracking_layer.data
+                    logger.debug(f"Current tracking data shape: {current_data.shape}")
+                    logger.debug(f"Current unique values: {np.unique(current_data)}")
 
-            # Validate after update
-            if not self.validate_stack_consistency():
-                raise ValueError("Stack consistency validation failed after visualization update")
+                # Handle input data
+                if isinstance(data, tuple):
+                    frame_data, frame_index = data
+                    if self.tracking_layer is not None:
+                        update_data = self.tracking_layer.data.copy()
+                        update_data[frame_index] = frame_data
+                    else:
+                        shape = (frame_index + 1, *frame_data.shape)
+                        update_data = np.zeros(shape, dtype=frame_data.dtype)
+                        update_data[frame_index] = frame_data
+                else:
+                    update_data = data.copy()
+
+                logger.debug(f"Update data shape: {update_data.shape}")
+                logger.debug(f"Update unique values: {np.unique(update_data)}")
+
+                # Update or create layer
+                with self.viewer.events.blocker_all():
+                    if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
+                        self.tracking_layer.data = update_data
+                        self.tracking_layer.refresh()
+                    else:
+                        self.tracking_layer = self.viewer.add_labels(
+                            update_data,
+                            name='Segmentation',
+                            opacity=0.5,
+                            visible=True
+                        )
+
+                # Ensure layer visibility
+                self.tracking_layer.visible = True
 
         except Exception as e:
-            logger.error(f"Error updating visualization: {e}")
+            logger.error(f"VisualizationManager: Error updating visualization: {e}", exc_info=True)
             raise
         finally:
             self._updating = False
-            if self.tracking_layer is not None:
-                self.tracking_layer.refresh()
+            logger.debug("VisualizationManager: Update complete")
+    def _update_full_stack(self, stack_data: np.ndarray) -> None:
+        """Update full stack while preserving layer."""
+        logger.debug(f"Updating full stack with shape {stack_data.shape}")
 
-    @log_operation
+        # Handle 2D data
+        if stack_data.ndim == 2:
+            stack_data = stack_data[np.newaxis, ...]
+
+        # Validate dimensions
+        if stack_data.ndim != 3:
+            raise ValueError(f"Stack data must be 3D, got shape {stack_data.shape}")
+
+        logger.debug(f"VisualizationManager: Starting full stack update")
+        logger.debug(f"VisualizationManager: Input data shape: {stack_data.shape}")
+        logger.debug(f"VisualizationManager: Input data unique values: {np.unique(stack_data)}")
+
+        if self.tracking_layer is not None:
+            logger.debug(f"VisualizationManager: Current tracking layer: {self.tracking_layer.name}")
+            logger.debug(f"VisualizationManager: Tracking layer in viewer: {self.tracking_layer in self.viewer.layers}")
+            if self.tracking_layer in self.viewer.layers:
+                logger.debug(f"VisualizationManager: Current tracking data shape: {self.tracking_layer.data.shape}")
+                logger.debug(f"VisualizationManager: Current tracking unique values: {np.unique(self.tracking_layer.data)}")
+
+        # Log all current layers
+        logger.debug("VisualizationManager: Current viewer layers:")
+        for layer in self.viewer.layers:
+            logger.debug(f"  - {layer.name} ({type(layer)})")
+
+        try:
+            # Update existing layer if possible
+            if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
+                self.tracking_layer.data = stack_data
+                self.tracking_layer.refresh()
+            else:
+                # Create new layer only if necessary
+                self.tracking_layer = self.viewer.add_labels(
+                    stack_data,
+                    name='Segmentation',
+                    opacity=0.5,
+                    visible=True
+                )
+
+            self._current_dims = stack_data.shape
+
+            logger.debug("VisualizationManager: After update:")
+            logger.debug(f"VisualizationManager: Tracking layer still exists: {self.tracking_layer is not None}")
+            if self.tracking_layer is not None:
+                logger.debug(f"VisualizationManager: Tracking layer in viewer: {self.tracking_layer in self.viewer.layers}")
+                logger.debug(f"VisualizationManager: Updated data shape: {self.tracking_layer.data.shape}")
+                logger.debug(f"VisualizationManager: Updated unique values: {np.unique(self.tracking_layer.data)}")
+
+
+        except Exception as e:
+            logger.error(f"Error updating full stack: {e}")
+            raise
+
     def _update_single_frame(self, frame_data: np.ndarray, frame_index: int) -> None:
         """Update a single frame in the visualization."""
         if frame_data.ndim != 2:
@@ -94,27 +212,6 @@ class VisualizationManager:
 
             current_data[frame_index] = frame_data
             self.tracking_layer.data = current_data
-
-    @log_operation
-    def _update_full_stack(self, stack_data: np.ndarray) -> None:
-        """Update the visualization with a full stack of data."""
-        logger.debug(f"Updating full stack with shape {stack_data.shape}")
-        # Handle 2D data
-        if stack_data.ndim == 2:
-            stack_data = stack_data[np.newaxis, ...]
-
-        # Validate dimensions
-        if stack_data.ndim != 3:
-            raise ValueError(f"Stack data must be 3D, got shape {stack_data.shape}")
-
-        # Remove existing layer if it exists
-        if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
-            self.viewer.layers.remove(self.tracking_layer)
-            self.tracking_layer = None
-
-        # Create new layer
-        self.tracking_layer = self._create_tracking_layer(stack_data)
-        self._current_dims = stack_data.shape
 
     def validate_stack_consistency(self):
         """Validate that visualization state is consistent"""
@@ -164,16 +261,6 @@ class VisualizationManager:
         finally:
             self._updating = False
 
-    def _create_tracking_layer(self, data: np.ndarray) -> "napari.layers.Labels":
-        """Create a new tracking layer with proper settings."""
-        layer = self.viewer.add_labels(
-            data,
-            name='Segmentation',  # Changed from 'Cell Tracking'
-            opacity=0.5,
-            visible=True
-        )
-        return layer
-
     def set_data_manager(self, data_manager: "DataManager"):
         """Allow setting the data manager after initialization."""
         self.data_manager = data_manager
@@ -209,99 +296,4 @@ class VisualizationManager:
         self.clear_visualization()
         self.viewer = None
 
-    @log_operation
-    def update_tracking_visualization(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> None:
-        """Update the tracking visualization with new data."""
-        if self._updating:
-            logger.debug("Visualization update cancelled - updating in progress")
-            return
-
-        try:
-            self._updating = True
-            logger.debug(f"Updating visualization with data type: {type(data)}")
-
-            # Handle input data
-            if isinstance(data, tuple):
-                frame_data, frame_index = data
-                self._update_single_frame(frame_data, frame_index)
-            else:
-                self._update_full_stack(data)
-
-            # Validate after update
-            if not self.validate_stack_consistency():
-                raise ValueError("Stack consistency validation failed after visualization update")
-
-        except Exception as e:
-            logger.error(f"Error updating visualization: {e}")
-            raise
-        finally:
-            self._updating = False
-            if self.tracking_layer is not None:
-                self.tracking_layer.refresh()
-
-    @log_operation
-    def _update_single_frame(self, frame_data: np.ndarray, frame_index: int) -> None:
-        """Update a single frame in the visualization."""
-        if frame_data.ndim != 2:
-            logger.debug(f"Invalid frame data shape: {frame_data.shape}")
-            raise ValueError(f"Frame data must be 2D, got shape {frame_data.shape}")
-
-        logger.debug(f"Updating frame {frame_index}")
-
-        if self.tracking_layer is None:
-            # Initialize with proper dimensions
-            if self._current_dims is None:
-                num_frames = int(self.viewer.dims.range[0][1] + 1)
-                empty_stack = np.zeros((num_frames, *frame_data.shape), dtype=frame_data.dtype)
-                empty_stack[frame_index] = frame_data
-                self.tracking_layer = self._create_tracking_layer(empty_stack)
-                self._current_dims = empty_stack.shape
-            else:
-                # Use existing dimensions
-                empty_stack = np.zeros(self._current_dims, dtype=frame_data.dtype)
-                empty_stack[frame_index] = frame_data
-                self.tracking_layer = self._create_tracking_layer(empty_stack)
-        else:
-            # Update existing layer
-            current_data = self.tracking_layer.data.copy()  # Create a copy to prevent reference issues
-            if frame_data.shape != current_data.shape[1:]:
-                raise ValueError(
-                    f"Frame shape {frame_data.shape} doesn't match existing data shape "
-                    f"{current_data.shape[1:]}"
-                )
-
-            # Update only the specified frame
-            current_data[frame_index] = frame_data
-            self.tracking_layer.data = current_data
-
-    @log_operation
-    def _update_full_stack(self, stack_data: np.ndarray) -> None:
-        """Update the visualization with a full stack of data."""
-        logger.debug(f"Updating full stack with shape {stack_data.shape}")
-        # Handle 2D data
-        if stack_data.ndim == 2:
-            stack_data = stack_data[np.newaxis, ...]
-
-        # Validate dimensions
-        if stack_data.ndim != 3:
-            raise ValueError(f"Stack data must be 3D, got shape {stack_data.shape}")
-
-        # Create or update tracking layer
-        if self.tracking_layer is None:
-            self.tracking_layer = self._create_tracking_layer(stack_data)
-            self._current_dims = stack_data.shape
-        else:
-            # Check if dimensions changed
-            if stack_data.shape != self.tracking_layer.data.shape:
-                logger.warning(
-                    f"Data dimensions changed from {self.tracking_layer.data.shape} "
-                    f"to {stack_data.shape}"
-                )
-                # Remove existing layer and create new one
-                self.clear_visualization()
-                self.tracking_layer = self._create_tracking_layer(stack_data)
-                self._current_dims = stack_data.shape
-            else:
-                # Update existing layer
-                self.tracking_layer.data = stack_data
 
