@@ -148,21 +148,43 @@ class Visualizer:
                 )
                 logger.info(f"Saved edge detection animation to {output_path}")
 
+        # Create output directories for enabled visualizations
         if self.config.intercalation_events:
-            logger.info("Creating intercalation visualizations")
-            vis_dir = base_dir / "intercalation_output"
-            visualizations_generated = True
+            intercalation_dir = base_dir / "intercalation_output"
+            intercalation_dir.mkdir(exist_ok=True)
 
-            # Collect all intercalation events from edges
+            # Collect all intercalation events
             all_events = []
             for edge_data in results.edges.values():
                 if hasattr(edge_data, 'intercalations'):
                     all_events.extend(edge_data.intercalations)
 
-            # Create visualization for each intercalation event
-            for i, event in enumerate(all_events):
-                output_path = vis_dir / f"intercalation_event_{i:03d}.png"
-                self.plot_intercalation_event(event, output_path)
+            if all_events:
+                # Extract boundaries by frame from results
+                boundaries_by_frame = {}
+                for edge_id, edge_data in results.edges.items():
+                    for frame_idx, frame in enumerate(edge_data.frames):
+                        if frame not in boundaries_by_frame:
+                            boundaries_by_frame[frame] = []
+                        boundary = CellBoundary(
+                            cell_ids=edge_data.cell_pairs[frame_idx],
+                            coordinates=edge_data.coordinates[frame_idx],
+                            endpoint1=edge_data.coordinates[frame_idx][0],
+                            endpoint2=edge_data.coordinates[frame_idx][-1],
+                            length=edge_data.lengths[frame_idx]
+                        )
+                        boundaries_by_frame[frame].append(boundary)
+
+                # Create the intercalation animation
+                output_path = intercalation_dir / "intercalations.gif"
+                self.create_intercalation_animation(
+                    segmentation_stack,
+                    boundaries_by_frame,
+                    all_events,
+                    output_path
+                )
+                visualizations_generated = True
+                logger.info(f"Generated intercalation animation with {len(all_events)} events")
 
         if self.config.edge_length_evolution:
             logger.info("Creating edge analysis visualizations")
@@ -393,111 +415,6 @@ class Visualizer:
         vmax = np.max(image)
         return Normalize(vmin=vmin, vmax=vmax)
 
-    def visualize_cell_tracks(self, segmentation_stack: np.ndarray, output_path: Path) -> None:
-        """Create a visualization showing cell trajectories across all frames."""
-        cell_ids = np.unique(segmentation_stack)
-        cell_ids = cell_ids[cell_ids != 0]  # Remove background
-
-        # Set up the figure with black background
-        plt.style.use('dark_background')
-        fig, ax = plt.subplots(figsize=self.config.figure_size)
-        fig.patch.set_facecolor('black')
-        ax.set_facecolor('black')
-
-        # Show last frame with simple gray colormap
-        plt.imshow(segmentation_stack[-1], cmap='gray')
-
-        # Generate colors for tracks using rainbow colormap
-        colors = plt.cm.rainbow(np.linspace(0, 1, len(cell_ids)))
-
-        for cell_id, color in zip(cell_ids, colors):
-            centroids = []
-            for frame in segmentation_stack:
-                mask = frame == cell_id
-                if np.any(mask):
-                    y, x = np.where(mask)
-                    centroids.append((np.mean(x), np.mean(y)))
-
-            if centroids:
-                track = np.array(centroids)
-                plt.plot(track[:, 0], track[:, 1], '-',
-                         color=color, linewidth=self.config.line_width,
-                         alpha=self.config.alpha)
-                plt.plot(track[:, 0], track[:, 1], 'o',
-                         color=color, markersize=3)
-                plt.text(track[-1, 0], track[-1, 1], str(cell_id),
-                         color=color, fontsize=self.config.font_size,
-                         ha='left', va='bottom')
-
-        plt.title('Cell Trajectories', color='white')
-        plt.axis('off')
-        plt.savefig(output_path, dpi=self.config.dpi, bbox_inches='tight',
-                    facecolor='black', edgecolor='none')
-        plt.close()
-
-    def create_tracking_animation(self, segmentation_stack: np.ndarray,
-                                  output_path: Path) -> None:
-        """Create an animation showing cell tracking over time."""
-        cell_ids = np.unique(segmentation_stack)
-        cell_ids = cell_ids[cell_ids != 0]  # Remove background
-
-        # Generate colors for tracks
-        colors = {
-            int(cell_id): color
-            for cell_id, color in zip(cell_ids, plt.cm.rainbow(np.linspace(0, 1, len(cell_ids))))
-        }
-
-        # Set up the figure with black background
-        plt.style.use('dark_background')
-        fig, ax = plt.subplots(figsize=self.config.figure_size)
-        fig.patch.set_facecolor('black')
-        ax.set_facecolor('black')
-
-        # Pre-calculate all centroids
-        all_centroids = {int(cell_id): [] for cell_id in cell_ids}
-        for frame in segmentation_stack:
-            for cell_id in cell_ids:
-                mask = frame == cell_id
-                if np.any(mask):
-                    y, x = np.where(mask)
-                    all_centroids[int(cell_id)].append((np.mean(x), np.mean(y)))
-                else:
-                    all_centroids[int(cell_id)].append(None)
-
-        def update(frame_idx):
-            ax.clear()
-            ax.set_facecolor('black')
-            # Show current frame with simple gray colormap
-            ax.imshow(segmentation_stack[frame_idx], cmap='gray', alpha=1)
-
-            for cell_id in cell_ids:
-                cell_id_int = int(cell_id)
-                centroids = [c for c in all_centroids[cell_id_int][:frame_idx + 1]
-                             if c is not None]
-                if centroids:
-                    track = np.array(centroids)
-                    color = colors[cell_id_int]
-                    ax.plot(track[:, 0], track[:, 1], '-',
-                            color=color, linewidth=self.config.line_width,
-                            alpha=self.config.alpha)
-                    ax.plot(track[:, 0], track[:, 1], 'o',
-                            color=color, markersize=3)
-                    if len(track) > 0:
-                        ax.text(track[-1, 0], track[-1, 1], str(cell_id_int),
-                                color=color, fontsize=self.config.font_size,
-                                ha='left', va='bottom')
-
-            ax.set_title(f'Frame {frame_idx}', color='white')
-            ax.axis('off')
-
-        anim = FuncAnimation(fig, update, frames=len(segmentation_stack),
-                             interval=self.config.animation_interval, blit=False)
-
-        # Save animation with black background
-        anim.save(str(output_path), writer='pillow',
-                  savefig_kwargs={'facecolor': 'black'})
-        plt.close()
-
     def visualize_boundaries(self, segmented_stack: np.ndarray,
                              boundaries_by_frame: Dict[int, List['CellBoundary']],
                              output_path: Optional[Path] = None,
@@ -561,66 +478,56 @@ class Visualizer:
     def visualize_intercalation_event(self, event: 'IntercalationEvent',
                                       frame_before: np.ndarray,
                                       frame_after: np.ndarray,
+                                      event_number: int,
                                       output_path: Optional[Path] = None) -> None:
-        """Create visualization of an intercalation event with improved clarity"""
+        """Create visualization of an intercalation event with event numbering"""
         losing_cells = tuple(int(x) for x in event.losing_cells)
         gaining_cells = tuple(int(x) for x in event.gaining_cells)
 
-        # Create figure with less empty space
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
-        fig.patch.set_facecolor('white')  # Set figure background to white
+        fig.patch.set_facecolor('white')
 
-        # Create custom colormaps for non-participating cells
-        other_cells_cmap = ListedColormap(['white'])  # White for non-participating cells
+        # Create custom colormaps
+        other_cells_cmap = ListedColormap(['white'])
 
-        # Get the valid region bounds to zoom in
         def get_bounds(frame):
             mask = frame > 0
             rows = np.any(mask, axis=1)
             cols = np.any(mask, axis=0)
             rmin, rmax = np.where(rows)[0][[0, -1]]
             cmin, cmax = np.where(cols)[0][[0, -1]]
-            # Add padding
             pad = 10
             rmin, rmax = max(0, rmin - pad), min(frame.shape[0], rmax + pad)
             cmin, cmax = max(0, cmin - pad), min(frame.shape[1], cmax + pad)
             return rmin, rmax, cmin, cmax
 
-        # Plot each frame
-        for ax, frame, title in [(ax1, frame_before, 'Before (Frame {})'.format(event.frame)),
-                                 (ax2, frame_after, 'After (Frame {})'.format(event.frame + 1))]:
-            ax.set_facecolor('white')  # Set axes background to white
+        # Add event label at the top of the figure
+        fig.suptitle(f'Event {event_number}', y=1.02, fontsize=12)
 
+        for ax, frame, title in [(ax1, frame_before, 'Before'),
+                                 (ax2, frame_after, 'After')]:
+            ax.set_facecolor('white')
             rmin, rmax, cmin, cmax = get_bounds(frame)
             frame_zoomed = frame[rmin:rmax, cmin:cmax]
-
-            # Create base image with white for all cells
             ax.imshow(frame_zoomed > 0, cmap=other_cells_cmap)
 
-            # Plot cells involved in intercalation
-            for cell_id in losing_cells:
-                mask = frame_zoomed == cell_id
-                if np.any(mask):
-                    # Red for losing cells
-                    ax.imshow(mask, cmap='Reds', alpha=0.7 if ax == ax1 else 0.3)
-                    y, x = np.nonzero(mask)
-                    ax.text(np.mean(x), np.mean(y), str(cell_id),
-                            color='darkred', fontsize=12, fontweight='bold',
-                            ha='center', va='center')
+            # Plot all cells with edge highlighting
+            for cell_id in np.unique(frame_zoomed):
+                if cell_id > 0:
+                    mask = frame_zoomed == cell_id
+                    edges = binary_dilation(mask) & ~mask
+                    ax.imshow(edges, cmap=ListedColormap(['none', 'black']), alpha=0.2)
 
-            for cell_id in gaining_cells:
-                mask = frame_zoomed == cell_id
-                if np.any(mask):
-                    # Blue for gaining cells
-                    ax.imshow(mask, cmap='Blues', alpha=0.3 if ax == ax1 else 0.7)
-                    y, x = np.nonzero(mask)
-                    ax.text(np.mean(x), np.mean(y), str(cell_id),
-                            color='darkblue', fontsize=12, fontweight='bold',
-                            ha='center', va='center')
+                    # Highlight cells involved in intercalation
+                    if cell_id in losing_cells or cell_id in gaining_cells:
+                        y, x = np.nonzero(mask)
+                        ax.text(np.mean(x), np.mean(y), str(cell_id),
+                                color='red', fontsize=12, fontweight='bold',
+                                ha='center', va='center')
 
-            # Add boundary highlighting
+            # Find and highlight the intercalating boundary
             if ax == ax1:
-                # Find boundary between losing cells
+                # Before intercalation - highlight boundary between losing cells
                 boundary = np.zeros_like(frame_zoomed, dtype=bool)
                 for c1 in losing_cells:
                     for c2 in losing_cells:
@@ -628,11 +535,10 @@ class Visualizer:
                             mask1 = frame_zoomed == c1
                             mask2 = frame_zoomed == c2
                             boundary |= (binary_dilation(mask1) & mask2)
-                # Plot boundary
                 if np.any(boundary):
                     ax.imshow(boundary, cmap=ListedColormap(['none', 'red']), alpha=0.8)
             else:
-                # Find boundary between gaining cells
+                # After intercalation - highlight boundary between gaining cells
                 boundary = np.zeros_like(frame_zoomed, dtype=bool)
                 for c1 in gaining_cells:
                     for c2 in gaining_cells:
@@ -640,22 +546,12 @@ class Visualizer:
                             mask1 = frame_zoomed == c1
                             mask2 = frame_zoomed == c2
                             boundary |= (binary_dilation(mask1) & mask2)
-                # Plot boundary
                 if np.any(boundary):
-                    ax.imshow(boundary, cmap=ListedColormap(['none', 'blue']), alpha=0.8)
-
-            # Add cell edges for all cells
-            for cell_id in np.unique(frame_zoomed):
-                if cell_id > 0:  # Skip background
-                    mask = frame_zoomed == cell_id
-                    edges = binary_dilation(mask) & ~mask
-                    ax.imshow(edges, cmap=ListedColormap(['none', 'black']), alpha=0.2)
+                    ax.imshow(boundary, cmap=ListedColormap(['none', 'red']), alpha=0.8)
 
             ax.set_title(title)
             ax.axis('off')
 
-        plt.suptitle(f'Intercalation Event:\nCells {losing_cells} separate, Cells {gaining_cells} connect',
-                     y=1.05, color="black")
         plt.tight_layout()
 
         if output_path:
@@ -668,16 +564,11 @@ class Visualizer:
     def create_intercalation_animation(self, tracked_stack: np.ndarray,
                                        boundaries_by_frame: Dict[int, List['CellBoundary']],
                                        events: List['IntercalationEvent'],
-                                       output_dir: Path) -> None:
-        """Create animation showing intercalation events."""
+                                       output_path: Path) -> None:
+        """Create animation showing intercalation events with frame-by-frame visualization."""
         if not events:
             logger.warning("No events provided for animation")
             return
-
-        output_path = output_dir / "intercalations.gif"
-        padding = 2
-        start_frame = max(0, min(e.frame for e in events) - padding)
-        end_frame = min(len(tracked_stack), max(e.frame for e in events) + padding + 1)
 
         fig, ax = plt.subplots(figsize=self.config.figure_size)
 
@@ -685,35 +576,32 @@ class Visualizer:
             ax.clear()
             ax.imshow(tracked_stack[frame], cmap='gray')
 
-            # Get active events for this frame
-            active_events = []
-            for event in events:
-                # Show losing cells boundary at event frame
+            # Check for losing edges at current frame
+            for event_idx, event in enumerate(events, 1):
                 if frame == event.frame:
-                    active_events.append((event, 'losing'))
-                # Show gaining cells boundary at frame after event
-                elif frame == event.frame + 1:
-                    active_events.append((event, 'gaining'))
+                    # Find and highlight the boundary between losing cells
+                    losing_pair = set(int(x) for x in event.losing_cells)
+                    for boundary in boundaries_by_frame[frame]:
+                        current_pair = set(int(x) for x in boundary.cell_ids)
+                        if current_pair == losing_pair:
+                            # Plot the boundary
+                            ax.plot(boundary.coordinates[:, 1],
+                                    boundary.coordinates[:, 0],
+                                    'r-', linewidth=self.config.line_width * 2)
 
-            # Highlight only the boundaries involved in active events
-            for event, event_type in active_events:
-                for boundary in boundaries_by_frame[frame]:
-                    if event_type == 'losing' and set(int(x) for x in boundary.cell_ids) == set(int(x) for x in event.losing_cells):
-                        ax.plot(boundary.coordinates[:, 1],
-                                boundary.coordinates[:, 0],
-                                'r-', linewidth=self.config.line_width,
-                                label='Separating cells')
-                    elif event_type == 'gaining' and set(int(x) for x in boundary.cell_ids) == set(int(x) for x in event.gaining_cells):
-                        ax.plot(boundary.coordinates[:, 1],
-                                boundary.coordinates[:, 0],
-                                'g-', linewidth=self.config.line_width,
-                                label='Connecting cells')
 
-            # Add legend if there are active events
-            # if active_events:
-            #     handles, labels = ax.get_legend_handles_labels()
-                # by_label = dict(zip(labels, handles))
-                # ax.legend(by_label.values(), by_label.keys(), loc='upper right')
+            for event_idx, event in enumerate(events, 1):
+                if frame - 1 == event.frame:
+                    # Find and highlight the boundary between gaining cells in the next frame
+                    gaining_pair = set(int(x) for x in event.gaining_cells)
+                    for boundary in boundaries_by_frame[frame]:  # Look in next frame
+                        current_pair = set(int(x) for x in boundary.cell_ids)
+                        if current_pair == gaining_pair:
+                            # Plot the boundary
+                            ax.plot(boundary.coordinates[:, 1],
+                                    boundary.coordinates[:, 0],
+                                    'r-', linewidth=self.config.line_width * 2)
+
 
             ax.set_title(f'Frame {frame}')
             ax.axis('off')
@@ -722,14 +610,13 @@ class Visualizer:
         anim = FuncAnimation(
             fig,
             update,
-            frames=range(start_frame, end_frame),
+            frames=range(len(tracked_stack)),
             interval=self.config.animation_interval,
             blit=False
         )
 
         anim.save(str(output_path), writer='pillow')
         plt.close()
-
     def plot_edge_length_tracks(self, trajectories: Dict[int, 'EdgeData'],
                                 output_path: Path) -> None:
         """Plot edge length trajectories in groups of 10."""

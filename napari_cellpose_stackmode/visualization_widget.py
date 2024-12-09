@@ -1,11 +1,10 @@
 import numpy as np
-from PyQt5.QtWidgets import QGridLayout
 from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
-
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QCheckBox, QSpinBox,
-    QGroupBox, QFormLayout, QPushButton, QMessageBox, QFileDialog
+    QGroupBox, QFormLayout, QPushButton, QMessageBox, QFileDialog,
+    QGridLayout  # Add QGridLayout here
 )
 from qtpy.QtCore import Signal
 import napari
@@ -295,11 +294,13 @@ class VisualizationWidget(QWidget):
 
         finally:
             self.generate_button.setEnabled(True)
+
     def _get_output_directory(self) -> Optional[Path]:
         """Show directory dialog for selecting output location"""
         dialog = QFileDialog(self)
         dialog.setWindowTitle("Select Output Directory for Visualizations")
-        dialog.setFileMode(QFileDialog.DirectoryOnly)
+        # Change DirectoryOnly to Directory
+        dialog.setFileMode(QFileDialog.Directory)
 
         # Start in last used directory if available
         if hasattr(self.data_manager, 'last_directory') and self.data_manager.last_directory:

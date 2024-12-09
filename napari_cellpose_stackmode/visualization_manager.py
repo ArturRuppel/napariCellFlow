@@ -409,7 +409,7 @@ class VisualizationManager:
                 for event in edge.intercalations:
                     # Get frames right before and after intercalation
                     event_frame = event.frame
-                    frames_to_show = [event_frame - 1, event_frame, event_frame + 1]
+                    frames_to_show = [event_frame, event_frame + 1]
 
                     for frame in frames_to_show:
                         if frame in edge.frames:
@@ -520,57 +520,6 @@ class VisualizationManager:
             colors.append((*rgb, 1.0))  # Add alpha channel
         return colors
 
-
-    def _hadrgasdgasdgadsgasdgasdgsags_layer(self, boundaries_by_frame: Dict[int, List[CellBoundary]]) -> None:
-        """Create layer with each edge having a unique color"""
-        points = []
-        properties = {
-            'frame': [],
-            'cell_pair': [],
-            'edge_id': []
-        }
-
-        # First pass: collect unique cell pairs
-        unique_cell_pairs = set()
-        for boundaries in boundaries_by_frame.values():
-            for boundary in boundaries:
-                cell_pair = tuple(sorted(boundary.cell_ids))
-                unique_cell_pairs.add(cell_pair)
-
-        # Generate distinct colors for each unique cell pair
-        unique_colors = self.generate_distinct_colors(len(unique_cell_pairs))
-        color_map = dict(zip(unique_cell_pairs, unique_colors))
-
-        # Second pass: create visualization
-        colors = []
-        for frame, boundaries in sorted(boundaries_by_frame.items()):
-            for i, boundary in enumerate(boundaries):
-                cell_pair = tuple(sorted(boundary.cell_ids))
-                coords = np.column_stack((
-                    np.full(len(boundary.coordinates), frame),
-                    boundary.coordinates
-                ))
-                points.append(coords)
-                colors.extend([color_map[cell_pair]] * len(coords))
-
-                # Add properties
-                properties['frame'].extend([frame] * len(coords))
-                properties['cell_pair'].extend([f"{cell_pair[0]}-{cell_pair[1]}"] * len(coords))
-                properties['edge_id'].extend([i] * len(coords))
-
-        if points:
-            coords_array = np.vstack(points)
-            colors_array = np.array(colors)
-
-            self._colored_edges_layer = self.viewer.add_points(
-                coords_array,
-                name="Colored Edges",
-                size=2,
-                face_color=colors_array,
-                opacity=0.8,
-                properties=properties,
-                ndim=3
-            )
 
     @property
     def tracked_layer(self) -> Optional[Labels]:
