@@ -137,25 +137,6 @@ class ImagePreprocessor:
 
         return processed, info
 
-    def preprocess_stack(self, image_stack: np.ndarray) -> Tuple[np.ndarray, list]:
-        """Process an entire image stack."""
-        if image_stack.ndim != 3:
-            raise ValueError(f"Expected 3D stack, got shape {image_stack.shape}")
-
-        processed_stack = np.zeros_like(image_stack, dtype=np.uint8)
-        preprocessing_info = []
-
-        for t in range(len(image_stack)):
-            processed, info = self.preprocess_frame(image_stack[t])
-            processed_stack[t] = processed
-            preprocessing_info.append(info)
-
-        return processed_stack, preprocessing_info
-
-
-    def _create_exclude_mask(self, image: np.ndarray) -> np.ndarray:
-        """Create mask of dark regions to exclude from analysis"""
-        return (image <= self.params.black_region_threshold).astype(np.uint8)
 
     def update_parameters(self, new_params: PreprocessingParameters) -> None:
         """Update preprocessing parameters"""

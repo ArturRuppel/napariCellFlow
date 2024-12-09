@@ -237,19 +237,6 @@ class EdgeAnalyzer:
 
         return edge_trajectories
 
-    def _get_unique_edge_id(self, cells_before: Tuple[int, int], cells_after: Tuple[int, int]) -> frozenset:
-        """
-        Create unique identifier for an edge that can undergo multiple intercalations.
-
-        Args:
-            cells_before: Tuple of cell IDs before intercalation
-            cells_after: Tuple of cell IDs after intercalation
-
-        Returns:
-            frozenset containing both cell pairs as frozen sets
-        """
-        return frozenset([frozenset(cells_before), frozenset(cells_after)])
-
     def _merge_edge_groups(self, lost_edge: FrozenSet[int], gained_edge: FrozenSet[int], frame: int):
         # Find all groups that contain either edge or any historically related edges
         related_groups = set()
@@ -297,6 +284,7 @@ class EdgeAnalyzer:
             # Update all edge to group mappings
             for edge_id in merged.edge_ids:
                 self._edge_to_group[edge_id] = base_group_id
+
     def _detect_edges(self, frame_data: np.ndarray) -> List[CellBoundary]:
         """Detect edges in a single frame"""
         boundaries = []
@@ -316,66 +304,6 @@ class EdgeAnalyzer:
 
         return boundaries
 
-    def _merge_edge_data(self, base: EdgeData, other: EdgeData):
-        """Merge two EdgeData objects"""
-        # Combine and sort by frame
-        frames = base.frames + other.frames
-        lengths = base.lengths + other.lengths
-        cell_pairs = base.cell_pairs + other.cell_pairs
-        coordinates = base.coordinates + other.coordinates
-
-        # Sort everything by frame
-        sorted_indices = np.argsort(frames)
-        base.frames = [frames[i] for i in sorted_indices]
-        base.lengths = [lengths[i] for i in sorted_indices]
-        base.cell_pairs = [cell_pairs[i] for i in sorted_indices]
-        base.coordinates = [coordinates[i] for i in sorted_indices]
-
-    def process_frame(self, frame_number: int, frame_data: np.ndarray) -> List[CellBoundary]:
-        """Process a single frame to detect edges"""
-        boundaries = []
-        cell_ids = np.unique(frame_data)
-        cell_ids = cell_ids[cell_ids != 0]  # Remove background
-
-        # Detect edges between all cell pairs
-        for i, cell1 in enumerate(cell_ids):
-            for cell2 in cell_ids[i + 1:]:
-                boundary = self._find_shared_boundary(frame_data, cell1, cell2)
-                if boundary is not None:
-                    boundaries.append(boundary)
-
-        # Filter isolated edges if enabled
-        if self.params.filter_isolated:
-            boundaries = self._filter_isolated_edges(boundaries)
-
-        # Track edges and update history
-        current_edges = {self._normalize_cell_pair(b.cell_ids): b for b in boundaries}
-
-        if frame_number > 0:
-            prev_edges = set(self._cell_pair_to_edge_id.keys())
-            new_edges = set(current_edges.keys()) - prev_edges
-
-            # Assign new edge IDs
-            for cell_pair in new_edges:
-                self._cell_pair_to_edge_id[cell_pair] = self.next_edge_id
-                self.next_edge_id += 1
-
-        # Update edge history
-        for boundary in boundaries:
-            cell_pair = self._normalize_cell_pair(boundary.cell_ids)
-            edge_id = self._cell_pair_to_edge_id.get(cell_pair)
-
-            if edge_id is None:
-                edge_id = self.next_edge_id
-                self.next_edge_id += 1
-                self._cell_pair_to_edge_id[cell_pair] = edge_id
-
-            if edge_id in self._edge_history:
-                self._update_edge_data(self._edge_history[edge_id], frame_number, boundary)
-            else:
-                self._edge_history[edge_id] = self._create_edge_data(edge_id, frame_number, boundary)
-
-        return boundaries
 
     def _filter_isolated_edges(self, boundaries: List[CellBoundary]) -> List[CellBoundary]:
         """Filter out edges that don't connect to others"""
@@ -579,6 +507,7 @@ class EdgeAnalyzer:
 
         logger.debug(f"Found {len(events)} events between frames {frame} and {next_frame}")
         return events
+
     def analyze_sequence(self, tracked_data: np.ndarray, progress_callback=None) -> EdgeAnalysisResults:
         """Process complete sequence of frames"""
         logger.info("Starting edge analysis sequence...")
@@ -600,7 +529,6 @@ class EdgeAnalyzer:
         # Process each frame
         boundaries_by_frame = {}
         all_intercalations = []
-
 
         total_frames = len(tracked_data)
         for frame_num in range(total_frames):
@@ -635,5 +563,3 @@ class EdgeAnalyzer:
         results.validate()
 
         return results
-
-

@@ -1,10 +1,13 @@
 import logging
-from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 import numpy as np
 from cellpose import models
-from dataclasses import dataclass
-from qtpy.QtCore import Signal, QObject
+from cellpose.core import use_gpu
+from qtpy.QtCore import QObject, Signal
+
+logger = logging.getLogger(__name__)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -50,17 +53,6 @@ class SegmentationParameters:
             raise ValueError("Minimum size must be positive")
         if self.batch_size <= 0:
             raise ValueError("Batch size must be positive")
-
-
-import logging
-from dataclasses import dataclass
-from typing import Optional, Tuple, Dict, Any
-import numpy as np
-from cellpose import models
-from cellpose.core import use_gpu
-from qtpy.QtCore import QObject, Signal
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -113,6 +105,9 @@ class CellposeSignals(QObject):
 
 class SegmentationHandler:
     """Handles cell segmentation using Cellpose 3.0"""
+    # Define signals
+    segmentation_completed = Signal(np.ndarray, dict)  # masks, metadata
+    segmentation_failed = Signal(str)  # error message
 
     def __init__(self):
         self.params = SegmentationParameters()
@@ -213,35 +208,4 @@ class SegmentationHandler:
             error_msg = f"Error during segmentation: {str(e)}"
             logger.error(error_msg)
             self.signals.segmentation_failed.emit(error_msg)
-            raise
-
-    # Define signals
-    segmentation_completed = Signal(np.ndarray, dict)  # masks, metadata
-    segmentation_failed = Signal(str)  # error message
-
-    def save_results(self, output_dir: Path) -> None:
-        """
-        Save the last segmentation results in Cellpose-compatible format
-
-        Args:
-            output_dir: Directory to save results
-        """
-        if not self.last_results:
-            error_msg = "No results to save. Run segment_frame first."
-            self.segmentation_failed.emit(error_msg)
-            raise RuntimeError(error_msg)
-
-        try:
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-
-            # Save in Cellpose .npy format for GUI compatibility
-            output_path = output_dir / "segmentation_results.npy"
-            np.save(output_path, self.last_results)
-
-            logger.info(f"Saved results to {output_path}")
-
-        except Exception as e:
-            logger.error(f"Error saving results: {str(e)}")
-            self.segmentation_failed.emit(str(e))
             raise

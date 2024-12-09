@@ -15,6 +15,7 @@ from napari_cellpose_stackmode.visualization_widget import VisualizationWidget
 
 logger = logging.getLogger(__name__)
 
+
 class CellposeStackmodeWidget(QWidget):
     def __init__(self, napari_viewer: "napari.Viewer"):
         super().__init__()
@@ -138,23 +139,3 @@ class CellposeStackmodeWidget(QWidget):
         """Handle visualization failure"""
         logger.error(f"Visualization failed: {error_msg}")
         QMessageBox.critical(self, "Error", f"Visualization generation failed: {error_msg}")
-
-    def _on_preprocessing_completed(self, processed_stack, preprocessing_info):
-        """Handle completion of preprocessing"""
-        logger.info("Preprocessing completed successfully")
-        self.data_manager.preprocessed_data = processed_stack
-
-    def _on_preprocessing_failed(self, error_msg):
-        """Handle preprocessing failure"""
-        logger.error(f"Preprocessing failed: {error_msg}")
-        QMessageBox.critical(self, "Error", f"Preprocessing failed: {error_msg}")
-
-    def _on_tracking_completed(self, tracked_data):
-        """Handle completion of tracking"""
-        logger.info("Tracking completed successfully")
-        self.data_manager.tracked_data = tracked_data
-
-    def _on_tracking_failed(self, error_msg):
-        """Handle tracking failure"""
-        logger.error(f"Tracking failed: {error_msg}")
-        QMessageBox.critical(self, "Error", f"Tracking failed: {error_msg}")

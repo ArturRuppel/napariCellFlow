@@ -1,17 +1,19 @@
+import logging
+from collections import deque
+from dataclasses import dataclass
+from typing import Optional
+
+import cv2
+import napari
 import numpy as np
+from napari.layers import Labels
 from qtpy.QtCore import Qt, Signal
+from qtpy.QtGui import QKeySequence
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QLabel, QApplication,
     QHBoxLayout, QShortcut
 )
-from qtpy.QtGui import QKeySequence
-import napari
-from napari.layers import Labels
-import logging
-import cv2
-from collections import deque
-from dataclasses import dataclass
-from typing import Optional, Union, Dict
+
 from .debug_logging import logger, log_operation
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,43 @@ class CellCorrectionWidget(QWidget):
         self._setup_shortcuts()
         QApplication.instance().installEventFilter(self)
 
+    def _setup_ui(self):
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # Status label
+        self.status_label = QLabel("Ready")
+        layout.addWidget(self.status_label)
+
+        # Control buttons in a horizontal layout
+        buttons_layout = QHBoxLayout()
+
+        # Drawing mode toggle
+        self.toggle_draw_btn = QPushButton("Toggle Drawing Mode (or hold Ctrl)")
+        self.toggle_draw_btn.setCheckable(True)
+        buttons_layout.addWidget(self.toggle_draw_btn)
+
+        # Undo button
+        self.undo_btn = QPushButton("Undo (Ctrl+Z)")
+        self.undo_btn.setEnabled(False)
+        buttons_layout.addWidget(self.undo_btn)
+
+        layout.addLayout(buttons_layout)
+
+        # Updated instructions
+        instructions = QLabel(
+            "Drawing Mode:\n"
+            "- Hold Ctrl + Right click and drag to draw cell boundary\n"
+            "- Return to start point (marked with circle) to complete the cell\n"
+            "- Left click to delete cells\n"
+            "- Ctrl+Z to undo last action\n\n"
+            "Selection Mode:\n"
+            "- Right-click: Select cell\n"
+            "- Delete: Remove selected cell"
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+
     def eventFilter(self, watched_object, event):
         """Global event filter to catch key events regardless of focus"""
         if event.type() not in (event.KeyPress, event.KeyRelease):
@@ -126,6 +165,7 @@ class CellCorrectionWidget(QWidget):
 
         except Exception as e:
             logger.error(f"CellCorrection: Error updating drawing state: {e}")
+
     def _clear_drawing(self):
         try:
             logger.debug("CellCorrection: Starting drawing clear")
@@ -162,7 +202,6 @@ class CellCorrectionWidget(QWidget):
 
         except Exception as e:
             logger.error(f"CellCorrection: Error updating UI state: {e}")
-
 
     def _on_mouse_drag(self, viewer, event):
         """Handle mouse drag events"""
@@ -332,7 +371,7 @@ class CellCorrectionWidget(QWidget):
         points = np.clip(points, 0, np.array(frame_shape) - 1).astype(np.int32)
         cv2.fillPoly(new_cell_mask, [points[:, ::-1]], 1)
         return new_cell_mask
-    @log_operation
+
     def _handle_layer_added(self, event):
         """Handle when a new layer is added to the viewer"""
         if self._updating:
@@ -464,43 +503,6 @@ class CellCorrectionWidget(QWidget):
         finally:
             self._updating = False
 
-    def _setup_ui(self):
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-
-        # Status label
-        self.status_label = QLabel("Ready")
-        layout.addWidget(self.status_label)
-
-        # Control buttons in a horizontal layout
-        buttons_layout = QHBoxLayout()
-
-        # Drawing mode toggle
-        self.toggle_draw_btn = QPushButton("Toggle Drawing Mode (or hold Ctrl)")
-        self.toggle_draw_btn.setCheckable(True)
-        buttons_layout.addWidget(self.toggle_draw_btn)
-
-        # Undo button
-        self.undo_btn = QPushButton("Undo (Ctrl+Z)")
-        self.undo_btn.setEnabled(False)
-        buttons_layout.addWidget(self.undo_btn)
-
-        layout.addLayout(buttons_layout)
-
-        # Updated instructions
-        instructions = QLabel(
-            "Drawing Mode:\n"
-            "- Hold Ctrl + Right click and drag to draw cell boundary\n"
-            "- Return to start point (marked with circle) to complete the cell\n"
-            "- Left click to delete cells\n"
-            "- Ctrl+Z to undo last action\n\n"
-            "Selection Mode:\n"
-            "- Right-click: Select cell\n"
-            "- Delete: Remove selected cell"
-        )
-        instructions.setWordWrap(True)
-        layout.addWidget(instructions)
-
     def _store_undo_state(self, description: str):
         """Store current state for undo"""
         if self._updating:
@@ -562,7 +564,6 @@ class CellCorrectionWidget(QWidget):
         """Handle toggle button state changes"""
         self.toggle_state = checked
         self._update_drawing_state()
-
 
     def undo_last_action(self):
         """Undo the last action"""
@@ -635,7 +636,6 @@ class CellCorrectionWidget(QWidget):
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
         self.undo_shortcut.activated.connect(self.undo_last_action)
 
-
     def set_masks_layer(self, masks: np.ndarray):
         """Set or update the masks layer."""
         if self._updating:
@@ -676,8 +676,6 @@ class CellCorrectionWidget(QWidget):
             raise
         finally:
             self._updating = False
-
-
 
     def _get_current_frame_mask(self):
         """Get mask for the current frame."""
@@ -811,7 +809,6 @@ class CellCorrectionWidget(QWidget):
                         return
 
                 self._update_drawing_preview()
-
 
     def _handle_layer_removed(self, event):
         """Handle layer removal events."""

@@ -285,7 +285,6 @@ class PreprocessingWidget(QWidget):
 
         layout.addStretch()
 
-
     def connect_signals(self):
         """Connect widget signals with special handling for odd-only values"""
         # Intensity range controls
@@ -613,51 +612,6 @@ class PreprocessingWidget(QWidget):
         finally:
             self._set_controls_enabled(True)
 
-
-    def _update_from_slider(self, values):
-        """Update spinboxes when slider changes"""
-        min_val, max_val = values
-        self.min_spin.blockSignals(True)
-        self.max_spin.blockSignals(True)
-
-        self.min_spin.setValue(min_val)
-        self.max_spin.setValue(max_val)
-
-        self.current_min_intensity = min_val
-        self.current_max_intensity = max_val
-
-        self.min_spin.blockSignals(False)
-        self.max_spin.blockSignals(False)
-
-        self.update_parameters()
-
-    def _update_from_spinboxes(self):
-        """Update slider when spinboxes change"""
-        min_val = self.min_spin.value()
-        max_val = self.max_spin.value()
-
-        # Ensure min <= max
-        if min_val > max_val:
-            if self.sender() == self.min_spin:
-                max_val = min_val
-                self.max_spin.setValue(max_val)
-            else:
-                min_val = max_val
-                self.min_spin.setValue(min_val)
-
-        self.current_min_intensity = min_val
-        self.current_max_intensity = max_val
-
-        self.intensity_slider.blockSignals(True)
-        self.intensity_slider.setValue((min_val, max_val))
-        self.intensity_slider.blockSignals(False)
-
-        self.update_parameters()
-
-    def _toggle_clahe_controls(self, enabled: bool):
-        """Enable/disable CLAHE parameter controls"""
-        self.clahe_clip_spin.setEnabled(enabled)
-        self.clahe_grid_spin.setEnabled(enabled)
 
     def _update_status(self, message: str, progress: Optional[int] = None):
         """Update status message and progress bar"""
