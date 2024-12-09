@@ -9,7 +9,7 @@ from matplotlib.colors import ListedColormap, hsv_to_rgb, Normalize
 from scipy.ndimage import binary_dilation
 from tqdm import tqdm
 
-from napari_cellpose_stackmode.structure import VisualizationConfig
+from napari_cellpose_stackmode.structure import VisualizationConfig, CellBoundary
 
 logger = logging.getLogger(__name__)
 
@@ -114,16 +114,39 @@ class Visualizer:
             directory.mkdir(exist_ok=True)
             logger.debug(f"Created directory: {directory}")
 
-        # Generate edge-related visualizations
+        # Generate edge detection visualization if enabled
         if self.config.edge_detection_overlay:
             logger.info("Creating edge detection visualizations")
             edge_dir = base_dir / "edge_output"
+            edge_dir.mkdir(exist_ok=True)
             visualizations_generated = True
 
-            # Create visualization of edges over time
+            # Extract boundaries by frame from the results
+            boundaries_by_frame = {}
             for edge_id, edge_data in results.edges.items():
-                output_path = edge_dir / f"edge_{edge_id}_evolution.png"
-                self.plot_edge_length_tracks({edge_id: edge_data}, output_path)
+                for frame_idx, frame in enumerate(edge_data.frames):
+                    if frame not in boundaries_by_frame:
+                        boundaries_by_frame[frame] = []
+                    # Create CellBoundary object from edge data
+                    boundary = CellBoundary(
+                        cell_ids=edge_data.cell_pairs[frame_idx],
+                        coordinates=edge_data.coordinates[frame_idx],
+                        endpoint1=edge_data.coordinates[frame_idx][0],
+                        endpoint2=edge_data.coordinates[frame_idx][-1],
+                        length=edge_data.lengths[frame_idx]
+                    )
+                    boundaries_by_frame[frame].append(boundary)
+
+            # Create the boundary visualization animation
+            if segmentation_stack is not None and boundaries_by_frame:
+                output_path = edge_dir / "edge_detection.gif"
+                self.visualize_boundaries(
+                    segmented_stack=segmentation_stack,
+                    boundaries_by_frame=boundaries_by_frame,
+                    output_path=output_path,
+                    show_progress=True
+                )
+                logger.info(f"Saved edge detection animation to {output_path}")
 
         if self.config.intercalation_events:
             logger.info("Creating intercalation visualizations")

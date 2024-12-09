@@ -262,20 +262,23 @@ class VisualizationWidget(QWidget):
             visualizer = Visualizer(config=new_config, napari_viewer=self.viewer)
             logger.debug("Created new visualizer with config and viewer")
 
-            # Check for analysis results
+            # Get analysis results or create from edge analysis widget data
+            if not hasattr(self.data_manager, 'analysis_results') or self.data_manager.analysis_results is None:
+                # Try to get data from edge analysis widget if available
+                if hasattr(self, 'edge_analysis_widget') and hasattr(self.edge_analysis_widget, 'get_analysis_data'):
+                    boundaries, edge_data, events = self.edge_analysis_widget.get_analysis_data()
+                    if boundaries and edge_data:
+                        self.data_manager.set_analysis_results(boundaries, edge_data, events or [])
+                else:
+                    raise ValueError("No analysis results available. Please complete edge analysis first.")
+
             if self.data_manager.analysis_results is None:
-                raise ValueError("Analysis results not available. Please complete analysis steps first.")
+                raise ValueError("No analysis results available. Please complete edge analysis first.")
 
             # Generate visualizations
             logger.debug(f"Analysis results available: {self.data_manager.analysis_results is not None}")
             if self.data_manager.analysis_results:
                 logger.debug(f"Number of edges in results: {len(self.data_manager.analysis_results.edges)}")
-
-            logger.debug("Enabled visualizations:")
-            logger.debug(f"- Tracking plots: {self.config.tracking_plots_enabled}")
-            logger.debug(f"- Edge detection overlay: {self.config.edge_detection_overlay}")
-            logger.debug(f"- Intercalation events: {self.config.intercalation_events}")
-            logger.debug(f"- Edge length evolution: {self.config.edge_length_evolution}")
 
             logger.debug("Starting visualization creation")
             visualizer.create_visualizations(self.data_manager.analysis_results)
@@ -292,7 +295,6 @@ class VisualizationWidget(QWidget):
 
         finally:
             self.generate_button.setEnabled(True)
-
     def _get_output_directory(self) -> Optional[Path]:
         """Show directory dialog for selecting output location"""
         dialog = QFileDialog(self)

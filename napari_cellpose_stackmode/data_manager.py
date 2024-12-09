@@ -1,12 +1,13 @@
 import logging
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, Dict, List
 from threading import Lock
 import numpy as np
 import tifffile
 from .debug_logging import log_operation
 
 logger = logging.getLogger(__name__)
+from napari_cellpose_stackmode.structure import EdgeAnalysisResults, EdgeAnalysisParams
 
 
 class DataManager:
@@ -18,9 +19,66 @@ class DataManager:
         self._preprocessed_data = None
         self._segmentation_data = None
         self._tracked_data = None
+        self._analysis_results = None
         self._num_frames = None
         self._frame_states = {}  # Track state of individual frames
         self._initialized = False
+
+    def __init__(self):
+        self._updating = False
+        self._lock = Lock()
+        self._preprocessed_data = None
+        self._segmentation_data = None
+        self._tracked_data = None
+        self._analysis_results = None  # Added this line
+        self._num_frames = None
+        self._frame_states = {}  # Track state of individual frames
+        self._initialized = False
+
+    @property
+    def analysis_results(self) -> Optional['EdgeAnalysisResults']:
+        """Get the edge analysis results."""
+        with self._lock:
+            return self._analysis_results
+
+    @analysis_results.setter
+    def analysis_results(self, results: Optional['EdgeAnalysisResults']):
+        """Set the edge analysis results with validation."""
+        if self._updating:
+            return
+
+        with self._lock:
+            try:
+                self._updating = True
+                self._analysis_results = results
+            finally:
+                self._updating = False
+
+    def set_analysis_results(self, boundaries_by_frame: Dict[int, List['CellBoundary']],
+                             edge_data: Dict[int, 'EdgeData'],
+                             events: List['IntercalationEvent']) -> None:
+        """
+        Set analysis results from component data.
+
+        Args:
+            boundaries_by_frame: Dictionary mapping frame numbers to lists of cell boundaries
+            edge_data: Dictionary mapping edge IDs to their tracking data
+            events: List of detected intercalation events
+        """
+
+        # Create EdgeAnalysisResults object with default parameters
+        results = EdgeAnalysisResults(EdgeAnalysisParams())
+
+        # Add edge data
+        for edge_id, data in edge_data.items():
+            results.add_edge(data)
+
+        # Update metadata
+        if boundaries_by_frame:
+            results.update_metadata('total_frames', max(boundaries_by_frame.keys()) + 1)
+            results.update_metadata('frame_ids', sorted(boundaries_by_frame.keys()))
+
+        self.analysis_results = results
 
     def initialize_stack(self, num_frames: int) -> None:
         """Initialize the stack with proper dimensionality and frame tracking."""
