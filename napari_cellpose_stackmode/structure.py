@@ -1,6 +1,7 @@
 import logging
 import pickle
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any, NamedTuple
 
@@ -17,7 +18,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-@dataclass
 @dataclass
 class VisualizationConfig:
     """Configuration for visualization output generation"""
@@ -63,6 +63,7 @@ class VisualizationConfig:
         if self.histogram_bins <= 0:
             raise ValueError("histogram_bins must be positive")
 
+
 @dataclass
 class AnalysisConfig:
     """Configuration for analysis parameters"""
@@ -95,6 +96,35 @@ class TrackingParameters:
             raise ValueError("Minimum cell size cannot be negative")
         if self.max_frame_gap < 1:
             raise ValueError("Maximum frame gap must be at least 1")
+
+
+@dataclass
+class EdgeAnalysisParams:
+    """Combined parameters for edge analysis pipeline"""
+    # Edge detection params
+    dilation_radius: int = 1
+    min_overlap_pixels: int = 5
+    min_edge_length: float = 0.0
+    filter_isolated: bool = True
+
+    # Intercalation params
+    temporal_window: int = 1
+    min_contact_frames: int = 1
+
+    def validate(self) -> None:
+        """Validate all parameters"""
+        if self.dilation_radius < 1 or self.dilation_radius > 10:
+            raise ValueError("Dilation radius must be between 1 and 10")
+        if self.min_overlap_pixels < 1 or self.min_overlap_pixels > 100:
+            raise ValueError("Minimum overlap pixels must be between 1 and 100")
+        if self.min_edge_length < 0:
+            raise ValueError("Minimum edge length cannot be negative")
+        if self.temporal_window < 1:
+            raise ValueError("Temporal window must be positive")
+        if self.min_contact_frames < 1:
+            raise ValueError("Minimum contact frames must be positive")
+        if self.min_contact_frames > self.temporal_window:
+            raise ValueError("Minimum contact frames cannot exceed temporal window")
 
 
 @dataclass
@@ -254,6 +284,63 @@ class IntercalationEvent:
     losing_cells: Tuple[int, int]
     gaining_cells: Tuple[int, int]
     coordinates: np.ndarray
+
+
+@dataclass
+class EdgeData:
+    """Comprehensive edge tracking data"""
+    edge_id: int
+    frames: List[int]
+    cell_pairs: List[Tuple[int, int]]
+    lengths: List[float]
+    coordinates: List[np.ndarray]
+    intercalations: List[IntercalationEvent] = field(default_factory=list)
+
+    def add_frame(self, frame: int, cells: Tuple[int, int], length: float, coords: np.ndarray) -> None:
+        """Add data for a new frame"""
+        self.frames.append(frame)
+        self.cell_pairs.append(cells)
+        self.lengths.append(length)
+        self.coordinates.append(coords)
+
+    def add_intercalation(self, event: IntercalationEvent) -> None:
+        """Record an intercalation event"""
+        self.intercalations.append(event)
+        self.intercalations.sort(key=lambda x: x.frame)
+
+
+class EdgeAnalysisResults:
+    """Container for complete analysis results"""
+
+    def __init__(self, params: EdgeAnalysisParams):
+        self.edges: Dict[int, EdgeData] = {}
+        self.metadata: Dict[str, Any] = {
+            'total_frames': 0,
+            'frame_ids': [],
+            'timestamp': datetime.now().isoformat(),
+            'parameters': params
+        }
+
+    def add_edge(self, edge: EdgeData) -> None:
+        """Add or update edge data"""
+        self.edges[edge.edge_id] = edge
+
+    def get_edge(self, edge_id: int) -> Optional[EdgeData]:
+        """Retrieve edge data by ID"""
+        return self.edges.get(edge_id)
+
+    def update_metadata(self, key: str, value: Any) -> None:
+        """Update metadata field"""
+        self.metadata[key] = value
+
+    def validate(self) -> None:
+        """Validate results integrity"""
+        if not self.edges:
+            raise ValueError("No edge data present")
+        if not self.metadata['frame_ids']:
+            raise ValueError("No frames recorded")
+        if not isinstance(self.metadata['parameters'], EdgeAnalysisParams):
+            raise ValueError("Invalid or missing analysis parameters")
 
 
 class AnalysisResults(NamedTuple):

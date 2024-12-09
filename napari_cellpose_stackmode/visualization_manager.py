@@ -1,12 +1,16 @@
+import colorsys
 import logging
 from threading import Lock
-from typing import Optional, Tuple, Union
-import numpy as np
+from typing import Optional, Dict, List
+from typing import Tuple, Union
+
 import napari
+import numpy as np
+from napari.layers import Layer, Labels, Points
 from napari.utils.transforms import Affine
 
-from napari_cellpose_stackmode import data_manager
-from napari_cellpose_stackmode.debug_logging import log_operation
+from napari_cellpose_stackmode.structure import EdgeAnalysisResults
+from .structure import CellBoundary, IntercalationEvent
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +25,11 @@ class VisualizationManager:
         self.overlay_layer = None
         self._updating = False
         self._current_dims = None
-        self._layer_lock = Lock()  # Add thread safety
-
+        self._layer_lock = Lock()
+        self._edge_layer: Optional[Points] = None
+        self._intercalation_layer: Optional[Points] = None
+        self._analysis_layer: Optional[Points] = None
+        self._color_cycle = np.random.RandomState(42)  # For consistent random colors
         # Connect to layer removal event
         self.viewer.layers.events.removed.connect(self._handle_layer_removal)
 
@@ -311,5 +318,536 @@ class VisualizationManager:
         """Clean up resources when closing."""
         self.clear_visualization()
         self.viewer = None
+
+    def _generate_distinct_color(self) -> np.ndarray:
+        """Generate a distinct color using golden ratio"""
+        golden_ratio = 0.618033988749895
+        hue = self._color_cycle.random()
+        hue += golden_ratio
+        hue %= 1
+        # Convert to RGB
+        hsv = np.array([hue, 0.8, 0.95])
+        rgb = np.array(colorsys.hsv_to_rgb(*hsv))
+        return np.append(rgb, 1.0)  # Add alpha channel
+
+    def update_edge_analysis_visualization(self, results: EdgeAnalysisResults) -> None:
+        """Update final edge analysis visualization with unique colors per edge"""
+        try:
+            if self._analysis_layer is not None and self._analysis_layer in self.viewer.layers:
+                self.viewer.layers.remove(self._analysis_layer)
+
+            edge_coords = []
+            edge_colors = []
+            edge_properties = {
+                'edge_id': [],
+                'frame': [],
+                'length': [],
+                'has_intercalation': []
+            }
+
+            # Generate unique color for each edge
+            edge_colors_map = {edge_id: self._generate_distinct_color()
+                               for edge_id in results.edges.keys()}
+
+            for edge_id, edge in results.edges.items():
+                edge_color = edge_colors_map[edge_id]
+
+                for frame_idx, frame in enumerate(edge.frames):
+                    coords = edge.coordinates[frame_idx]
+                    time_coords = np.column_stack((
+                        np.full(len(coords), frame),
+                        coords
+                    ))
+                    edge_coords.append(time_coords)
+                    edge_colors.extend([edge_color] * len(coords))
+
+                    edge_properties['edge_id'].extend([edge_id] * len(coords))
+                    edge_properties['frame'].extend([frame] * len(coords))
+                    edge_properties['length'].extend([edge.lengths[frame_idx]] * len(coords))
+                    edge_properties['has_intercalation'].extend([bool(edge.intercalations)] * len(coords))
+
+            if edge_coords:
+                coords_array = np.vstack(edge_coords)
+
+                self._analysis_layer = self.viewer.add_points(
+                    coords_array,
+                    name="Edge Analysis",
+                    size=5,  # Increased thickness
+                    face_color=edge_colors,
+                    opacity=0.8,
+                    properties=edge_properties,
+                    ndim=3
+                )
+
+            logger.info("Updated edge analysis visualization")
+
+        except Exception as e:
+            logger.error(f"Error updating edge analysis visualization: {e}")
+            raise
+
+    def update_intercalation_visualization(self, results: EdgeAnalysisResults) -> None:
+        """Visualize edges involved in intercalations"""
+        try:
+            if self._intercalation_layer is not None and self._intercalation_layer in self.viewer.layers:
+                self.viewer.layers.remove(self._intercalation_layer)
+
+            edge_coords = []
+            edge_properties = {
+                'frame': [],
+                'cell_pair': [],
+                'edge_id': []
+            }
+
+            # Use a single color for all intercalation edges
+            edge_color = np.array([1, 1, 0, 1])  # Yellow
+
+            # Process each edge that has intercalations
+            for edge_id, edge in results.edges.items():
+                if not edge.intercalations:
+                    continue
+
+                for event in edge.intercalations:
+                    # Get frames right before and after intercalation
+                    event_frame = event.frame
+                    frames_to_show = [event_frame - 1, event_frame, event_frame + 1]
+
+                    for frame in frames_to_show:
+                        if frame in edge.frames:
+                            idx = edge.frames.index(frame)
+                            coords = edge.coordinates[idx]
+                            time_coords = np.column_stack((
+                                np.full(len(coords), frame),
+                                coords
+                            ))
+                            edge_coords.append(time_coords)
+
+                            # Add properties
+                            edge_properties['frame'].extend([frame] * len(coords))
+                            edge_properties['edge_id'].extend([edge_id] * len(coords))
+                            cell_pair = f"{edge.cell_pairs[idx][0]}-{edge.cell_pairs[idx][1]}"
+                            edge_properties['cell_pair'].extend([cell_pair] * len(coords))
+
+            if edge_coords:
+                coords_array = np.vstack(edge_coords)
+
+                self._intercalation_layer = self.viewer.add_points(
+                    coords_array,
+                    name="Intercalation Events",
+                    size=6,  # Thick lines
+                    face_color=edge_color,
+                    opacity=1.0,
+                    properties=edge_properties,
+                    ndim=3
+                )
+
+                logger.info("Updated intercalation visualization")
+            else:
+                logger.warning("No intercalation events to visualize")
+
+        except Exception as e:
+            logger.error(f"Error updating intercalation visualization: {e}")
+            raise
+    def update_edge_visualization(self, boundaries_by_frame: Dict[int, List[CellBoundary]]) -> None:
+        """Update initial edge detection visualization"""
+        try:
+            if self._edge_layer is not None and self._edge_layer in self.viewer.layers:
+                self.viewer.layers.remove(self._edge_layer)
+
+            edge_coords = []
+            edge_properties = {
+                'frame': [],
+                'cell_pair': []
+            }
+
+            for frame, boundaries in sorted(boundaries_by_frame.items()):
+                for boundary in boundaries:
+                    coords = boundary.coordinates
+                    time_coords = np.column_stack((
+                        np.full(len(coords), frame),
+                        coords
+                    ))
+                    edge_coords.append(time_coords)
+
+                    cell_pair = f"{boundary.cell_ids[0]}-{boundary.cell_ids[1]}"
+                    edge_properties['frame'].extend([frame] * len(coords))
+                    edge_properties['cell_pair'].extend([cell_pair] * len(coords))
+
+            if edge_coords:
+                coords_array = np.vstack(edge_coords)
+
+                self._edge_layer = self.viewer.add_points(
+                    coords_array,
+                    name="Cell Edges",
+                    size=4,  # Increased thickness
+                    face_color='cyan',
+                    opacity=0.8,
+                    properties=edge_properties,
+                    ndim=3
+                )
+
+            logger.info("Updated edge visualization")
+
+        except Exception as e:
+            logger.error(f"Error updating edge visualization: {e}")
+            raise
+
+    def clear_edge_layers(self) -> None:
+        """Remove all edge-related layers"""
+        layer_names = ['Edge Analysis', 'Intercalation Events', 'Cell Edges']
+        for name in layer_names:
+            if name in self.viewer.layers:
+                self.viewer.layers.remove(name)
+
+    def clear_all_layers(self) -> None:
+        """Remove all managed layers from the viewer"""
+        if self._tracked_layer is not None and self._tracked_layer in self.viewer.layers:
+            self.viewer.layers.remove(self._tracked_layer)
+        self._tracked_layer = None
+
+        self.clear_edge_layers()
+        self._edge_layer = None
+        self._intercalation_layer = None
+        self._analysis_layer = None
+
+    def visualize_edge_detection(self, boundaries_by_frame: Dict[int, List[CellBoundary]]) -> None:
+        """Visualize the initial edge detection step"""
+        try:
+            if self._detected_edges_layer is not None and self._detected_edges_layer in self.viewer.layers:
+                self.viewer.layers.remove(self._detected_edges_layer)
+
+            edge_coords = []
+            edge_properties = {
+                'frame': [],
+                'cell_pair': [],
+                'length': []
+            }
+            edge_colors = []
+
+            for frame, boundaries in sorted(boundaries_by_frame.items()):
+                for boundary in boundaries:
+                    coords = boundary.coordinates
+                    # Add time dimension
+                    time_coords = np.column_stack((
+                        np.full(len(coords), frame),
+                        coords
+                    ))
+                    edge_coords.append(time_coords)
+
+                    # Add properties for each point
+                    cell_pair = f"{boundary.cell_ids[0]}-{boundary.cell_ids[1]}"
+                    edge_properties['frame'].extend([frame] * len(coords))
+                    edge_properties['cell_pair'].extend([cell_pair] * len(coords))
+                    edge_properties['length'].extend([boundary.length] * len(coords))
+                    edge_colors.extend([[0, 1, 1, 1]] * len(coords))  # Cyan for detected edges
+
+            if edge_coords:
+                coords_array = np.vstack(edge_coords)
+
+                self._detected_edges_layer = self.viewer.add_points(
+                    coords_array,
+                    name="Detected Edges",
+                    size=2,
+                    face_color=edge_colors,
+                    opacity=0.8,
+                    properties=edge_properties,
+                    ndim=3
+                )
+
+                logger.info("Updated edge detection visualization")
+                self.viewer.reset_view()
+            else:
+                logger.warning("No edge detection data to visualize")
+
+        except Exception as e:
+            logger.error(f"Error updating edge detection visualization: {e}")
+            raise
+
+    def visualize_intercalations(self, results: EdgeAnalysisResults) -> None:
+        """Visualize intercalation events"""
+        try:
+            if self._intercalation_layer is not None and self._intercalation_layer in self.viewer.layers:
+                self.viewer.layers.remove(self._intercalation_layer)
+
+            # Collect all intercalation events
+            intercalation_coords = []
+            intercalation_properties = {
+                'frame': [],
+                'losing_cells': [],
+                'gaining_cells': []
+            }
+
+            for edge in results.edges.values():
+                for event in edge.intercalations:
+                    # Add time dimension to coordinates
+                    time_coord = np.array([event.frame, *event.coordinates])
+                    intercalation_coords.append(time_coord)
+
+                    # Add properties
+                    intercalation_properties['frame'].append(event.frame)
+                    intercalation_properties['losing_cells'].append(
+                        f"{event.losing_cells[0]}-{event.losing_cells[1]}"
+                    )
+                    intercalation_properties['gaining_cells'].append(
+                        f"{event.gaining_cells[0]}-{event.gaining_cells[1]}"
+                    )
+
+            if intercalation_coords:
+                coords_array = np.stack(intercalation_coords)
+
+                self._intercalation_layer = self.viewer.add_points(
+                    coords_array,
+                    name="Intercalation Events",
+                    size=8,
+                    face_color='red',
+                    symbol='diamond',
+                    opacity=1.0,
+                    properties=intercalation_properties,
+                    ndim=3
+                )
+
+                logger.info("Updated intercalation visualization")
+            else:
+                logger.warning("No intercalation events to visualize")
+
+        except Exception as e:
+            logger.error(f"Error updating intercalation visualization: {e}")
+            raise
+
+    def visualize_identified_edges(self, results: EdgeAnalysisResults) -> None:
+        """Visualize the final identified and merged edges"""
+        try:
+            if self._identified_edges_layer is not None and self._identified_edges_layer in self.viewer.layers:
+                self.viewer.layers.remove(self._identified_edges_layer)
+
+            edge_coords = []
+            edge_colors = []
+            edge_properties = {
+                'edge_id': [],
+                'frame': [],
+                'cell_pair': [],
+                'has_intercalation': []
+            }
+
+            for edge_id, edge in results.edges.items():
+                has_intercalation = bool(edge.intercalations)
+
+                for frame_idx, frame in enumerate(edge.frames):
+                    coords = edge.coordinates[frame_idx]
+                    time_coords = np.column_stack((
+                        np.full(len(coords), frame),
+                        coords
+                    ))
+                    edge_coords.append(time_coords)
+
+                    # Different colors for edges with/without intercalations
+                    color = [1, 0.5, 0, 1] if has_intercalation else [0, 1, 0, 1]  # Orange for merged, green for stable
+                    edge_colors.extend([color] * len(coords))
+
+                    # Add properties
+                    edge_properties['edge_id'].extend([edge_id] * len(coords))
+                    edge_properties['frame'].extend([frame] * len(coords))
+                    edge_properties['cell_pair'].extend([f"{edge.cell_pairs[frame_idx][0]}-{edge.cell_pairs[frame_idx][1]}"] * len(coords))
+                    edge_properties['has_intercalation'].extend([has_intercalation] * len(coords))
+
+            if edge_coords:
+                coords_array = np.vstack(edge_coords)
+
+                self._identified_edges_layer = self.viewer.add_points(
+                    coords_array,
+                    name="Identified Edges",
+                    size=3,
+                    face_color=edge_colors,
+                    opacity=0.8,
+                    properties=edge_properties,
+                    ndim=3
+                )
+
+                logger.info("Updated identified edges visualization")
+            else:
+                logger.warning("No identified edges to visualize")
+
+        except Exception as e:
+            logger.error(f"Error updating identified edges visualization: {e}")
+            raise
+
+    def update_visualization(self, results: EdgeAnalysisResults, boundaries_by_frame: Dict[int, List[CellBoundary]]) -> None:
+        """Update all visualizations"""
+        self.clear_edge_layers()
+        self.visualize_edge_detection(boundaries_by_frame)
+        self.visualize_intercalations(results)
+        self.visualize_identified_edges(results)
+
+    def generate_distinct_colors(self, n: int) -> List[tuple]:
+        """Generate n visually distinct colors"""
+        colors = []
+        for i in range(n):
+            hue = i / n
+            saturation = 0.8 + (i % 3) * 0.1  # Vary saturation slightly
+            value = 0.9
+            rgb = colorsys.hsv_to_rgb(hue, saturation, value)
+            colors.append((*rgb, 1.0))  # Add alpha channel
+        return colors
+
+    def _create_all_edges_layer(self, boundaries_by_frame: Dict[int, List[CellBoundary]]) -> None:
+        """Create layer showing all edges in yellow"""
+        points = []
+        properties = {
+            'frame': [],
+            'cell_pair': []
+        }
+
+        for frame, boundaries in sorted(boundaries_by_frame.items()):
+            for boundary in boundaries:
+                # Add time dimension to coordinates
+                coords = np.column_stack((
+                    np.full(len(boundary.coordinates), frame),
+                    boundary.coordinates
+                ))
+                points.append(coords)
+
+                # Add properties
+                cell_pair = f"{boundary.cell_ids[0]}-{boundary.cell_ids[1]}"
+                properties['frame'].extend([frame] * len(coords))
+                properties['cell_pair'].extend([cell_pair] * len(coords))
+
+        if points:
+            coords_array = np.vstack(points)
+            colors = np.full((len(coords_array), 4), [1, 1, 0, 1])  # Yellow with alpha
+
+            self._all_edges_layer = self.viewer.add_points(
+                coords_array,
+                name="All Edges",
+                size=2,
+                face_color=colors,
+                opacity=0.8,
+                properties=properties,
+                ndim=3
+            )
+
+    def _create_intercalation_layer(self, boundaries_by_frame: Dict[int, List[CellBoundary]],
+                                  events: List[IntercalationEvent]) -> None:
+        """Create layer showing edges involved in intercalations"""
+        points = []
+        colors = []
+        properties = {
+            'frame': [],
+            'cell_pair': [],
+            'event_type': []
+        }
+
+        for event in events:
+            # Get frames before and after intercalation
+            frame_before = event.frame
+            frame_after = event.frame + 1
+
+            # Add losing edges (red)
+            if frame_before in boundaries_by_frame:
+                for boundary in boundaries_by_frame[frame_before]:
+                    cell_pair = tuple(sorted(boundary.cell_ids))
+                    if cell_pair == event.losing_cells:
+                        coords = np.column_stack((
+                            np.full(len(boundary.coordinates), frame_before),
+                            boundary.coordinates
+                        ))
+                        points.append(coords)
+                        colors.extend([[1, 0, 0, 1]] * len(coords))  # Red
+                        properties['frame'].extend([frame_before] * len(coords))
+                        properties['cell_pair'].extend([f"{cell_pair[0]}-{cell_pair[1]}"] * len(coords))
+                        properties['event_type'].extend(['losing'] * len(coords))
+
+            # Add gaining edges (green)
+            if frame_after in boundaries_by_frame:
+                for boundary in boundaries_by_frame[frame_after]:
+                    cell_pair = tuple(sorted(boundary.cell_ids))
+                    if cell_pair == event.gaining_cells:
+                        coords = np.column_stack((
+                            np.full(len(boundary.coordinates), frame_after),
+                            boundary.coordinates
+                        ))
+                        points.append(coords)
+                        colors.extend([[0, 1, 0, 1]] * len(coords))  # Green
+                        properties['frame'].extend([frame_after] * len(coords))
+                        properties['cell_pair'].extend([f"{cell_pair[0]}-{cell_pair[1]}"] * len(coords))
+                        properties['event_type'].extend(['gaining'] * len(coords))
+
+        if points:
+            coords_array = np.vstack(points)
+            colors_array = np.array(colors)
+
+            self._intercalation_layer = self.viewer.add_points(
+                coords_array,
+                name="Intercalations",
+                size=3,
+                face_color=colors_array,
+                opacity=1.0,
+                properties=properties,
+                ndim=3
+            )
+
+    def _create_colored_edges_layer(self, boundaries_by_frame: Dict[int, List[CellBoundary]]) -> None:
+        """Create layer with each edge having a unique color"""
+        points = []
+        properties = {
+            'frame': [],
+            'cell_pair': [],
+            'edge_id': []
+        }
+
+        # First pass: collect unique cell pairs
+        unique_cell_pairs = set()
+        for boundaries in boundaries_by_frame.values():
+            for boundary in boundaries:
+                cell_pair = tuple(sorted(boundary.cell_ids))
+                unique_cell_pairs.add(cell_pair)
+
+        # Generate distinct colors for each unique cell pair
+        unique_colors = self.generate_distinct_colors(len(unique_cell_pairs))
+        color_map = dict(zip(unique_cell_pairs, unique_colors))
+
+        # Second pass: create visualization
+        colors = []
+        for frame, boundaries in sorted(boundaries_by_frame.items()):
+            for i, boundary in enumerate(boundaries):
+                cell_pair = tuple(sorted(boundary.cell_ids))
+                coords = np.column_stack((
+                    np.full(len(boundary.coordinates), frame),
+                    boundary.coordinates
+                ))
+                points.append(coords)
+                colors.extend([color_map[cell_pair]] * len(coords))
+
+                # Add properties
+                properties['frame'].extend([frame] * len(coords))
+                properties['cell_pair'].extend([f"{cell_pair[0]}-{cell_pair[1]}"] * len(coords))
+                properties['edge_id'].extend([i] * len(coords))
+
+        if points:
+            coords_array = np.vstack(points)
+            colors_array = np.array(colors)
+
+            self._colored_edges_layer = self.viewer.add_points(
+                coords_array,
+                name="Colored Edges",
+                size=2,
+                face_color=colors_array,
+                opacity=0.8,
+                properties=properties,
+                ndim=3
+            )
+
+    @property
+    def tracked_layer(self) -> Optional[Labels]:
+        """The current tracked cells layer"""
+        return self._tracked_layer
+
+    @property
+    def edge_layer(self) -> Optional[Points]:
+        """The current edge detection layer"""
+        return self._edge_layer
+
+    @property
+    def analysis_layer(self) -> Optional[Points]:
+        """The current edge analysis layer"""
+        return self._analysis_layer
 
 

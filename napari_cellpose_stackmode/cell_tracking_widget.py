@@ -158,8 +158,6 @@ class CellTrackingWidget(QWidget):
             self._update_status("Cell tracking complete - use Save button to store results", 100)
             self.tracking_completed.emit(tracked_labels)
 
-            # Enable save button now that we have results
-            self.save_btn.setEnabled(True)
 
         except Exception as e:
             error_msg = f"Cell tracking failed: {str(e)}"
@@ -167,7 +165,6 @@ class CellTrackingWidget(QWidget):
             QMessageBox.critical(self, "Error", error_msg)
             self._update_status("Cell tracking failed", 0)
             self.tracking_failed.emit(error_msg)
-            self.save_btn.setEnabled(False)
 
         finally:
             self._set_controls_enabled(True)
@@ -210,8 +207,6 @@ class CellTrackingWidget(QWidget):
 
             self._update_status(f"Loaded tracked cells from {file_path.name}", 100)
 
-            # Enable save button since we now have results loaded
-            self.save_btn.setEnabled(True)
 
             # Emit completion signal
             self.tracking_completed.emit(tracked_data)
@@ -222,12 +217,10 @@ class CellTrackingWidget(QWidget):
             QMessageBox.critical(self, "Error", error_msg)
             self._update_status("Loading failed", 0)
             self.tracking_failed.emit(error_msg)
-            self.save_btn.setEnabled(False)
 
     def _set_controls_enabled(self, enabled: bool):
         """Enable or disable all controls except the save button"""
         self.track_btn.setEnabled(enabled)
-        self.load_btn.setEnabled(enabled)
         self.reset_btn.setEnabled(enabled)
         self.overlap_spin.setEnabled(enabled)
         self.displacement_spin.setEnabled(enabled)

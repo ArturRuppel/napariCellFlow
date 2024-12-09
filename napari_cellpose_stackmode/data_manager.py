@@ -78,115 +78,66 @@ class DataManager:
         with self._lock:
             try:
                 self._updating = True
-                logger.debug("DataManager: Starting segmentation data update")
-                logger.debug(f"DataManager: Input type: {type(value)}")
-                logger.debug(f"DataManager: Current num_frames: {self._num_frames}")
 
-                # Handle single frame update
-                if isinstance(value, tuple) and len(value) == 2:
-                    frame_data, frame_index = value
-                    logger.debug(f"DataManager: Updating single frame {frame_index}")
-                    logger.debug(f"DataManager: Frame data shape: {frame_data.shape}")
-
-                    # Check frame index before updating
-                    if frame_index >= self._num_frames:
-                        logger.error(f"DataManager: Frame index {frame_index} exceeds number of frames {self._num_frames}")
-                        raise ValueError(f"Frame index {frame_index} out of bounds for stack size {self._num_frames}")
-
-                    if self._segmentation_data is None:
-                        logger.debug("DataManager: Initializing segmentation data array")
-                        shape = (self._num_frames, *frame_data.shape)
-                        logger.debug(f"DataManager: Creating array with shape {shape}")
-                        self._segmentation_data = np.zeros(shape, dtype=frame_data.dtype)
-
-                    # Update frame
-                    self._segmentation_data[frame_index] = frame_data.copy()
-                    self._frame_states[frame_index] = {
-                        'modified': True,
-                        'last_update': np.datetime64('now')
-                    }
-                    logger.debug("DataManager: Frame update complete")
-
-                # Handle full stack update
+                # Handle single frame vs full stack update
+                if isinstance(value, tuple):
+                    self._update_single_frame(*value)
                 else:
-                    logger.debug("DataManager: Updating full stack")
-                    if value is not None:
-                        if value.ndim == 2:
-                            value = value[np.newaxis, ...]
-                        logger.debug(f"DataManager: Full stack shape: {value.shape}")
-                        self._segmentation_data = value.copy()
-                        self._frame_states = {
-                            i: {'modified': False, 'last_update': np.datetime64('now')}
-                            for i in range(value.shape[0])
-                        }
-                    else:
-                        self._segmentation_data = None
-                        self._frame_states.clear()
+                    self._update_full_stack(value)
 
             except Exception as e:
-                logger.error(f"DataManager: Error updating segmentation data: {e}", exc_info=True)
+                logger.error("DataManager: Error updating segmentation data", exc_info=True)
                 raise
             finally:
                 self._updating = False
-                logger.debug("DataManager: Update complete")
 
-    def _update_single_frame(self, frame_data: np.ndarray, frame_index: int) -> None:
-        """Update a single frame while preserving others."""
-        if not self._initialized:
-            raise RuntimeError("Stack not initialized. Call initialize_stack first.")
-
+    def _update_single_frame(self, frame_data: np.ndarray, frame_index: int):
+        """Update a single frame in the segmentation data."""
         if frame_index >= self._num_frames:
-            raise ValueError(f"Frame index {frame_index} exceeds stack size {self._num_frames}")
+            raise ValueError(f"Frame index {frame_index} out of bounds")
 
-        with self._lock:
-            try:
-                # Initialize if needed
-                if self._segmentation_data is None:
-                    self._segmentation_data = np.zeros((self._num_frames, *frame_data.shape), dtype=frame_data.dtype)
+        if self._segmentation_data is None:
+            # Initialize full stack with frame
+            shape = (self._num_frames, *frame_data.shape)
+            self._segmentation_data = np.zeros(shape, dtype=frame_data.dtype)
 
-                # Validate frame shape
-                if frame_data.shape != self._segmentation_data.shape[1:]:
-                    raise ValueError(
-                        f"Frame shape mismatch: expected {self._segmentation_data.shape[1:]}, "
-                        f"got {frame_data.shape}"
-                    )
+        elif frame_data.shape != self._segmentation_data.shape[1:]:
+            raise ValueError(f"Frame shape mismatch: expected {self._segmentation_data.shape[1:]}, got {frame_data.shape}")
 
-                # Update the frame
-                self._segmentation_data[frame_index] = frame_data.copy()  # Make explicit copy
-                self._frame_states[frame_index] = {
-                    'modified': True,
-                    'last_update': np.datetime64('now')
-                }
+        # Update frame and its state
+        self._segmentation_data[frame_index] = frame_data.copy()
+        self._frame_states[frame_index] = {
+            'modified': True,
+            'last_update': np.datetime64('now')
+        }
 
-                logger.debug(f"Updated frame {frame_index}")
-                logger.debug(f"Updated frame unique values: {np.unique(frame_data)}")
-                logger.debug(f"Full stack unique values: {np.unique(self._segmentation_data)}")
+    def _update_full_stack(self, stack_data: Optional[np.ndarray]):
+        """Update the full segmentation stack."""
+        if stack_data is None:
+            self._segmentation_data = None
+            self._frame_states.clear()
+            return
 
-            except Exception as e:
-                logger.error(f"Error updating frame: {e}")
-                raise
+        # Handle 2D data
+        if stack_data.ndim == 2:
+            stack_data = stack_data[np.newaxis, ...]
 
-    def _update_full_stack(self, new_stack: np.ndarray) -> None:
-        """Update the full stack while preserving modified frames."""
-        if not self._initialized:
-            raise RuntimeError("Stack not initialized. Call initialize_stack first.")
+        # Validate dimensions
+        if stack_data.ndim != 3:
+            raise ValueError(f"Invalid data dimensions: {stack_data.shape}")
 
-        # Create a mask of modified frames
-        modified_frames = np.array([
-            self._frame_states.get(i, {}).get('modified', False)
-            for i in range(self._num_frames)
-        ])
+        # Update stack and frame states
+        if stack_data.shape[0] < self._num_frames:
+            new_data = np.zeros((self._num_frames, *stack_data.shape[1:]), dtype=stack_data.dtype)
+            new_data[:stack_data.shape[0]] = stack_data
+            self._segmentation_data = new_data
+        else:
+            self._segmentation_data = stack_data.copy()
 
-        # Update only unmodified frames
-        for i in range(self._num_frames):
-            if not modified_frames[i]:
-                self._segmentation_data[i] = new_stack[i]
-                self._frame_states[i] = {
-                    'modified': False,
-                    'last_update': np.datetime64('now')
-                }
-
-        logger.debug(f"Updated full stack, preserved {modified_frames.sum()} modified frames")
+        self._frame_states = {
+            i: {'modified': False, 'last_update': np.datetime64('now')}
+            for i in range(self._segmentation_data.shape[0])
+        }
 
     @property
     def tracked_data(self) -> Optional[np.ndarray]:

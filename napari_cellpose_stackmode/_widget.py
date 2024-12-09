@@ -16,6 +16,8 @@ from napari_cellpose_stackmode.preprocessing_widget import PreprocessingWidget
 from napari_cellpose_stackmode.cell_tracking_widget import CellTrackingWidget
 from napari_cellpose_stackmode.data_manager import DataManager
 from napari_cellpose_stackmode.visualization_manager import VisualizationManager
+from napari_cellpose_stackmode.edge_analysis_widget import EdgeAnalysisWidget
+
 
 logger = logging.getLogger(__name__)
 
@@ -66,10 +68,18 @@ class CellposeStackmodeWidget(QWidget):
             self.visualization_manager
         )
 
+        # Initialize EdgeAnalysisWidget
+        self.edge_analysis_widget = EdgeAnalysisWidget(
+            self.viewer,
+            self.data_manager,
+            self.visualization_manager
+        )
+
         # Add widgets to tabs
         tabs.addTab(self.preprocessing_widget, "Preprocessing")
         tabs.addTab(self.segmentation_widget, "Segmentation")
         tabs.addTab(self.tracking_widget, "Cell Tracking")
+        tabs.addTab(self.edge_analysis_widget, "Edge Analysis")
 
 
         # Add tabs to container
