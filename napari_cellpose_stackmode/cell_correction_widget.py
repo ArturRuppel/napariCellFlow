@@ -433,27 +433,6 @@ class CellCorrectionWidget(QWidget):
             self.masks_layer = None
             self._full_masks = None
 
-    def _validate_loaded_segmentation(self, data: np.ndarray) -> bool:
-        """Validate loaded segmentation data"""
-        try:
-            # Check dimensions
-            if data.ndim not in [2, 3]:
-                raise ValueError(f"Invalid segmentation dimensions: {data.ndim}")
-
-            # Check data type
-            if not np.issubdtype(data.dtype, np.integer):
-                raise ValueError(f"Segmentation must contain integer labels, got {data.dtype}")
-
-            # Check value range
-            if data.min() < 0:
-                raise ValueError("Segmentation contains negative values")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Segmentation validation failed: {e}")
-            return False
-
     def _init_with_external_data(self, data: np.ndarray):
         """Initialize widget with externally loaded data"""
         if self._updating:
@@ -584,31 +563,6 @@ class CellCorrectionWidget(QWidget):
         self.toggle_state = checked
         self._update_drawing_state()
 
-    def _ensure_layer_sync(self):
-        """Ensure synchronization between layers and managers."""
-        try:
-            if self.masks_layer is None or self.masks_layer not in self.viewer.layers:
-                # Try to get from visualization manager
-                if self.vis_manager.tracking_layer is not None:
-                    self.masks_layer = self.vis_manager.tracking_layer
-                    return True
-
-            # Update visualization manager reference
-            if self.masks_layer is not None:
-                self.vis_manager.tracking_layer = self.masks_layer
-
-                # Ensure data manager is synchronized
-                if self.data_manager.segmentation_data is None:
-                    self.data_manager.segmentation_data = self.masks_layer.data.copy()
-                elif not np.array_equal(self.data_manager.segmentation_data, self.masks_layer.data):
-                    current_frame = int(self.viewer.dims.point[0])
-                    self.data_manager.segmentation_data = (self.masks_layer.data[current_frame], current_frame)
-
-            return self.masks_layer is not None and self.masks_layer in self.viewer.layers
-
-        except Exception as e:
-            logger.error(f"Error ensuring layer sync: {e}")
-            return False
 
     def undo_last_action(self):
         """Undo the last action"""
@@ -681,37 +635,6 @@ class CellCorrectionWidget(QWidget):
         self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
         self.undo_shortcut.activated.connect(self.undo_last_action)
 
-    def _on_correction_made(self, updated_masks: np.ndarray):
-        """Handle corrections without triggering cascading updates."""
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-
-            logger.debug(f"Updated masks shape: {updated_masks.shape}")
-            logger.debug(f"Unique values in updated masks: {np.unique(updated_masks)}")
-
-            # Block napari events during update
-            with self.viewer.events.blocker_all():
-                # Update data manager
-                self.data_manager.segmentation_data = updated_masks
-
-                # Update visualization for current frame only
-                if hasattr(self, '_full_masks') and self._full_masks is not None:
-                    current_slice = int(self.viewer.dims.point[0])
-                    self.masks_layer.data = updated_masks[current_slice]
-                else:
-                    self.masks_layer.data = updated_masks
-
-                # Update status
-                num_cells = len(np.unique(updated_masks)) - 1
-                self.status_label.setText(f"Correction applied. Current cell count: {num_cells}")
-
-        except Exception as e:
-            logger.error(f"Error applying correction: {str(e)}")
-        finally:
-            self._updating = False
 
     def set_masks_layer(self, masks: np.ndarray):
         """Set or update the masks layer."""
@@ -754,13 +677,7 @@ class CellCorrectionWidget(QWidget):
         finally:
             self._updating = False
 
-    def _get_next_cell_id(self):
-        """Get the next available unique cell ID."""
-        if self.masks_layer is None:
-            return 1
 
-        max_id = int(self.masks_layer.data.max())
-        return max_id + 1
 
     def _get_current_frame_mask(self):
         """Get mask for the current frame."""
@@ -774,19 +691,6 @@ class CellCorrectionWidget(QWidget):
         else:
             # For 2D data, return as is
             return self.masks_layer.data
-
-    def _create_empty_mask(self):
-        """Create an empty mask matching the current frame dimensions."""
-        if self.masks_layer is None:
-            return None
-
-        if len(self.masks_layer.data.shape) == 3:
-            # For 3D data, create empty frame
-            shape = self.masks_layer.data.shape[1:]  # Get y,x dimensions
-            return np.zeros(shape, dtype=self.masks_layer.data.dtype)
-        else:
-            # For 2D data
-            return np.zeros_like(self.masks_layer.data)
 
     def _handle_selection(self, coords):
         """Handle cell selection."""
@@ -907,49 +811,6 @@ class CellCorrectionWidget(QWidget):
                         return
 
                 self._update_drawing_preview()
-
-    def _handle_key_press(self, event):
-        """Handle key press events."""
-        if event.key() == Qt.Key_Control:
-            self.ctrl_pressed = True
-            self._update_drawing_state()
-        # Make sure to call the parent class's keyPressEvent
-        self.viewer.window.qt_viewer.__class__.keyPressEvent(self.viewer.window.qt_viewer, event)
-
-    def _handle_key_release(self, event):
-        """Handle key release events."""
-        if event.key() == Qt.Key_Control:
-            self.ctrl_pressed = False
-            self._update_drawing_state()
-        # Make sure to call the parent class's keyReleaseEvent
-        self.viewer.window.qt_viewer.__class__.keyReleaseEvent(self.viewer.window.qt_viewer, event)
-
-    def _on_ctrl_pressed(self):
-        """Handle Ctrl key press."""
-        self.ctrl_pressed = True
-        if not self.toggle_draw_btn.isChecked():
-            self.is_drawing = True
-            self.status_label.setText("Drawing Mode: Right-click and drag to draw cell contour")
-
-    def _on_ctrl_released(self):
-        """Handle Ctrl key release."""
-        self.ctrl_pressed = False
-        if not self.toggle_draw_btn.isChecked():
-            self.is_drawing = False
-            if not self.drawing_started:
-                self.status_label.setText("Selection Mode: Right-click to select cells")
-
-    def _toggle_drawing_mode(self, enabled: bool):
-        """Toggle between drawing and selection modes."""
-        self.is_drawing = enabled
-        self.drawing_started = False
-        self.start_point = None
-        self._clear_drawing()
-
-        if enabled:
-            self.status_label.setText("Drawing Mode: Right-click and drag to draw cell contour")
-        else:
-            self.status_label.setText("Selection Mode: Right-click to select cells")
 
 
     def _handle_layer_removed(self, event):
