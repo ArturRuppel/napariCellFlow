@@ -1,11 +1,4 @@
 import logging
-
-from napari_cellpose_stackmode.segmentation_widget import SegmentationWidget
-
-logger = logging.getLogger(__name__)
-
-import logging
-
 import napari
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
@@ -14,13 +7,13 @@ from qtpy.QtWidgets import (
 
 from napari_cellpose_stackmode.preprocessing_widget import PreprocessingWidget
 from napari_cellpose_stackmode.cell_tracking_widget import CellTrackingWidget
+from napari_cellpose_stackmode.segmentation_widget import SegmentationWidget
 from napari_cellpose_stackmode.data_manager import DataManager
 from napari_cellpose_stackmode.visualization_manager import VisualizationManager
 from napari_cellpose_stackmode.edge_analysis_widget import EdgeAnalysisWidget
-
+from napari_cellpose_stackmode.visualization_widget import VisualizationWidget
 
 logger = logging.getLogger(__name__)
-
 
 class CellposeStackmodeWidget(QWidget):
     def __init__(self, napari_viewer: "napari.Viewer"):
@@ -68,8 +61,14 @@ class CellposeStackmodeWidget(QWidget):
             self.visualization_manager
         )
 
-        # Initialize EdgeAnalysisWidget
         self.edge_analysis_widget = EdgeAnalysisWidget(
+            self.viewer,
+            self.data_manager,
+            self.visualization_manager
+        )
+
+        # Initialize new visualization widget
+        self.visualization_widget = VisualizationWidget(
             self.viewer,
             self.data_manager,
             self.visualization_manager
@@ -80,7 +79,7 @@ class CellposeStackmodeWidget(QWidget):
         tabs.addTab(self.segmentation_widget, "Segmentation")
         tabs.addTab(self.tracking_widget, "Cell Tracking")
         tabs.addTab(self.edge_analysis_widget, "Edge Analysis")
-
+        tabs.addTab(self.visualization_widget, "Visualization")
 
         # Add tabs to container
         container_layout.addWidget(tabs)
@@ -105,6 +104,40 @@ class CellposeStackmodeWidget(QWidget):
         # Connect tracking signals
         self.tracking_widget.tracking_completed.connect(self._on_tracking_completed)
         self.tracking_widget.tracking_failed.connect(self._on_tracking_failed)
+
+        # Connect visualization widget signals to handle visualization events
+        self.visualization_widget.visualization_completed.connect(self._on_visualization_completed)
+        self.visualization_widget.visualization_failed.connect(self._on_visualization_failed)
+
+    def _on_preprocessing_completed(self, processed_stack, preprocessing_info):
+        """Handle completion of preprocessing"""
+        logger.info("Preprocessing completed successfully")
+        self.data_manager.preprocessed_data = processed_stack
+
+    def _on_preprocessing_failed(self, error_msg):
+        """Handle preprocessing failure"""
+        logger.error(f"Preprocessing failed: {error_msg}")
+        QMessageBox.critical(self, "Error", f"Preprocessing failed: {error_msg}")
+
+    def _on_tracking_completed(self, tracked_data):
+        """Handle completion of tracking"""
+        logger.info("Tracking completed successfully")
+        self.data_manager.tracked_data = tracked_data
+
+    def _on_tracking_failed(self, error_msg):
+        """Handle tracking failure"""
+        logger.error(f"Tracking failed: {error_msg}")
+        QMessageBox.critical(self, "Error", f"Tracking failed: {error_msg}")
+
+    def _on_visualization_completed(self):
+        """Handle completion of visualization generation"""
+        logger.info("Visualization generation completed successfully")
+        QMessageBox.information(self, "Success", "Visualizations generated successfully")
+
+    def _on_visualization_failed(self, error_msg):
+        """Handle visualization failure"""
+        logger.error(f"Visualization failed: {error_msg}")
+        QMessageBox.critical(self, "Error", f"Visualization generation failed: {error_msg}")
 
     def _on_preprocessing_completed(self, processed_stack, preprocessing_info):
         """Handle completion of preprocessing"""

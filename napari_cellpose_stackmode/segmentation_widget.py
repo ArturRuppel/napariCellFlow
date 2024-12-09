@@ -270,25 +270,6 @@ class SegmentationWidget(QWidget):
                 self.status_label.setText("Ready")
             self.progress_bar.setEnabled(False)
             self.progress_bar.setValue(0)  # Reset progress bar when not busy
-    def _validate_frame_update(self, frame_index: int, data: np.ndarray) -> bool:
-        """Validate frame data before update."""
-        try:
-            if not self.data_manager._initialized:
-                raise ValueError("Data manager not initialized")
-
-            if frame_index >= self.data_manager._num_frames:
-                raise ValueError(f"Frame index {frame_index} out of bounds")
-
-            if self.data_manager.segmentation_data is not None:
-                expected_shape = self.data_manager.segmentation_data.shape[1:]
-                if data.shape != expected_shape:
-                    raise ValueError(f"Frame shape mismatch: expected {expected_shape}, got {data.shape}")
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Frame validation failed: {e}")
-            return False
 
     @log_operation
     def _on_segmentation_completed(self, masks: np.ndarray, results: dict):
