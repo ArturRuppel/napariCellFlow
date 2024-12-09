@@ -1,13 +1,11 @@
-import numpy as np
-import matplotlib.pyplot as plt
-import pandas as pd
-from matplotlib.animation import FuncAnimation
-from matplotlib.colors import ListedColormap, hsv_to_rgb, Normalize
+import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
-import logging
-from dataclasses import dataclass
-
+import napari
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.animation import FuncAnimation
+from matplotlib.colors import ListedColormap, hsv_to_rgb, Normalize
 from scipy.ndimage import binary_dilation
 from tqdm import tqdm
 
@@ -15,12 +13,13 @@ from napari_cellpose_stackmode.structure import VisualizationConfig
 
 logger = logging.getLogger(__name__)
 
+
 class Visualizer:
     """Handles all visualization tasks for cell tracking and analysis"""
 
-    def __init__(self, config: Optional[VisualizationConfig] = None):
+    def __init__(self, config: Optional[VisualizationConfig] = None, napari_viewer: Optional["napari.Viewer"] = None):
         self.config = config or VisualizationConfig()
-        # Set global style for white background and black text
+        self.viewer = napari_viewer
         plt.style.use('default')
         plt.rcParams.update({
             'figure.facecolor': 'white',
@@ -32,6 +31,309 @@ class Visualizer:
             'xtick.color': 'black',
             'ytick.color': 'black'
         })
+        logger.debug(f"Visualizer initialized with viewer: {napari_viewer is not None}")
+
+    def _get_segmentation_data(self) -> Optional[np.ndarray]:
+        """Get segmentation data from Napari layers"""
+        if self.viewer is None:
+            logger.debug("No viewer available")
+            return None
+
+        logger.debug(f"Available layers: {[layer.name for layer in self.viewer.layers]}")
+        for layer in self.viewer.layers:
+            logger.debug(f"Checking layer: {layer.name}, type: {type(layer)}")
+            if layer.name == "Segmentation" and isinstance(layer, napari.layers.Labels):
+                logger.debug(f"Found segmentation layer with shape: {layer.data.shape}")
+                return layer.data
+
+        logger.debug("No segmentation layer found")
+        return None
+
+    def create_visualizations(self, results: 'EdgeAnalysisResults', input_path: Path = None):
+        """Create all visualizations from analysis results"""
+        logger.info("Starting visualization generation")
+
+        # Get segmentation data from Napari
+        segmentation_stack = self._get_segmentation_data()
+        if segmentation_stack is None:
+            logger.warning("No segmentation data found in Napari layers")
+        else:
+            logger.info(f"Found segmentation stack with shape: {segmentation_stack.shape}")
+
+        # Create base directory for output
+        base_dir = (self.config.output_dir if self.config.output_dir
+                    else (input_path.parent / input_path.stem / "visualizations" if input_path
+                          else Path.cwd() / "visualizations"))
+
+        logger.debug(f"Creating output directory: {base_dir}")
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        # Track if any visualizations were generated
+        visualizations_generated = False
+
+        # Generate tracking visualizations if enabled
+        if self.config.tracking_plots_enabled and segmentation_stack is not None:
+            logger.info("Creating tracking visualizations")
+            tracking_dir = base_dir / "tracking_output"
+            tracking_dir.mkdir(exist_ok=True)
+            visualizations_generated = True
+
+            try:
+                logger.debug("Generating cell trajectories plot")
+                trajectory_path = tracking_dir / "cell_trajectories.png"
+                self.visualize_cell_tracks(segmentation_stack, trajectory_path)
+                logger.info(f"Saved cell trajectories to {trajectory_path}")
+            except Exception as e:
+                logger.error(f"Error generating cell trajectories: {e}", exc_info=True)
+
+            try:
+                logger.debug("Generating tracking animation")
+                animation_path = tracking_dir / "tracking_animation.gif"
+                self.create_tracking_animation(segmentation_stack, animation_path)
+                logger.info(f"Saved tracking animation to {animation_path}")
+            except Exception as e:
+                logger.error(f"Error generating tracking animation: {e}", exc_info=True)
+
+        # Create directories for other enabled visualizations
+        directories_to_create = []
+
+        if self.config.edge_detection_overlay:
+            directories_to_create.append(base_dir / "edge_output")
+            logger.info("Will create edge detection visualizations")
+
+        if self.config.intercalation_events:
+            directories_to_create.append(base_dir / "intercalation_output")
+            logger.info("Will create intercalation visualizations")
+
+        if self.config.edge_length_evolution:
+            directories_to_create.append(base_dir / "edge_analysis_output")
+            logger.info("Will create edge analysis visualizations")
+
+        # Create directories for enabled visualizations
+        for directory in directories_to_create:
+            directory.mkdir(exist_ok=True)
+            logger.debug(f"Created directory: {directory}")
+
+        # Generate edge-related visualizations
+        if self.config.edge_detection_overlay:
+            logger.info("Creating edge detection visualizations")
+            edge_dir = base_dir / "edge_output"
+            visualizations_generated = True
+
+            # Create visualization of edges over time
+            for edge_id, edge_data in results.edges.items():
+                output_path = edge_dir / f"edge_{edge_id}_evolution.png"
+                self.plot_edge_length_tracks({edge_id: edge_data}, output_path)
+
+        if self.config.intercalation_events:
+            logger.info("Creating intercalation visualizations")
+            vis_dir = base_dir / "intercalation_output"
+            visualizations_generated = True
+
+            # Collect all intercalation events from edges
+            all_events = []
+            for edge_data in results.edges.values():
+                if hasattr(edge_data, 'intercalations'):
+                    all_events.extend(edge_data.intercalations)
+
+            # Create visualization for each intercalation event
+            for i, event in enumerate(all_events):
+                output_path = vis_dir / f"intercalation_event_{i:03d}.png"
+                self.plot_intercalation_event(event, output_path)
+
+        if self.config.edge_length_evolution:
+            logger.info("Creating edge analysis visualizations")
+            edge_analysis_dir = base_dir / "edge_analysis_output"
+            visualizations_generated = True
+
+            # Create length evolution plots
+            self.plot_edge_length_tracks(
+                results.edges,
+                edge_analysis_dir / "all_edges_length_evolution.png"
+            )
+
+            # Create individual plots for edges with intercalations
+            if self.config.create_example_gifs:
+                example_dir = edge_analysis_dir / "examples"
+                example_dir.mkdir(exist_ok=True)
+
+                edges_with_intercalations = {
+                    edge_id: edge_data
+                    for edge_id, edge_data in results.edges.items()
+                    if hasattr(edge_data, 'intercalations') and edge_data.intercalations
+                }
+
+                for i, (edge_id, edge_data) in enumerate(edges_with_intercalations.items()):
+                    if i >= self.config.max_example_gifs:
+                        break
+                    output_path = example_dir / f"edge_{edge_id}_analysis.png"
+                    self.plot_edge_analysis(edge_data, output_path)
+
+        if not visualizations_generated:
+            logger.info("No visualizations were generated. Check if visualizations are enabled and required data is available.")
+        else:
+            logger.info(f"Visualization generation completed. Output saved to {base_dir}")
+
+    def visualize_cell_tracks(self, segmentation_stack: np.ndarray, output_path: Path) -> None:
+        """Create a visualization showing cell trajectories across all frames."""
+        logger.debug(f"Starting cell track visualization with stack shape: {segmentation_stack.shape}")
+
+        cell_ids = np.unique(segmentation_stack)
+        cell_ids = cell_ids[cell_ids != 0]  # Remove background
+        logger.debug(f"Found {len(cell_ids)} unique cell IDs: {cell_ids}")
+
+        # Set up the figure
+        plt.style.use('dark_background')
+        fig, ax = plt.subplots(figsize=self.config.figure_size)
+        fig.patch.set_facecolor('black')
+        ax.set_facecolor('black')
+
+        # Show last frame as background
+        logger.debug("Plotting last frame")
+        plt.imshow(segmentation_stack[-1], cmap='gray')
+
+        # Generate colors for tracks
+        colors = plt.cm.rainbow(np.linspace(0, 1, len(cell_ids)))
+
+        logger.debug("Processing cell trajectories")
+        for cell_id, color in zip(cell_ids, colors):
+            centroids = []
+            for frame in segmentation_stack:
+                mask = frame == cell_id
+                if np.any(mask):
+                    y, x = np.where(mask)
+                    centroids.append((np.mean(x), np.mean(y)))
+
+            if centroids:
+                track = np.array(centroids)
+                logger.debug(f"Plotting trajectory for cell {cell_id} with {len(centroids)} points")
+                plt.plot(track[:, 0], track[:, 1], '-',
+                         color=color, linewidth=self.config.line_width,
+                         alpha=self.config.alpha)
+                plt.plot(track[:, 0], track[:, 1], 'o',
+                         color=color, markersize=3)
+                plt.text(track[-1, 0], track[-1, 1], str(cell_id),
+                         color=color, fontsize=self.config.font_size,
+                         ha='left', va='bottom')
+
+        plt.title('Cell Trajectories', color='white')
+        plt.axis('off')
+
+        logger.debug(f"Saving figure to {output_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=self.config.dpi, bbox_inches='tight',
+                    facecolor='black', edgecolor='none')
+        plt.close()
+        logger.debug("Cell track visualization completed")
+
+    def create_tracking_animation(self, segmentation_stack: np.ndarray, output_path: Path) -> None:
+        """Create an animation showing cell tracking over time."""
+        logger.debug(f"Starting tracking animation with stack shape: {segmentation_stack.shape}")
+
+        cell_ids = np.unique(segmentation_stack)
+        cell_ids = cell_ids[cell_ids != 0]  # Remove background
+        logger.debug(f"Found {len(cell_ids)} unique cell IDs: {cell_ids}")
+
+        # Generate colors for tracks
+        colors = {
+            int(cell_id): color
+            for cell_id, color in zip(cell_ids, plt.cm.rainbow(np.linspace(0, 1, len(cell_ids))))
+        }
+
+        # Pre-calculate all centroids
+        logger.debug("Pre-calculating cell centroids")
+        all_centroids = {int(cell_id): [] for cell_id in cell_ids}
+        for frame in segmentation_stack:
+            for cell_id in cell_ids:
+                mask = frame == cell_id
+                if np.any(mask):
+                    y, x = np.where(mask)
+                    all_centroids[int(cell_id)].append((np.mean(x), np.mean(y)))
+                else:
+                    all_centroids[int(cell_id)].append(None)
+
+        # Set up the figure
+        plt.style.use('dark_background')
+        fig, ax = plt.subplots(figsize=self.config.figure_size)
+        fig.patch.set_facecolor('black')
+        ax.set_facecolor('black')
+
+        def update(frame_idx):
+            ax.clear()
+            ax.set_facecolor('black')
+            ax.imshow(segmentation_stack[frame_idx], cmap='gray', alpha=1)
+
+            for cell_id in cell_ids:
+                cell_id_int = int(cell_id)
+                centroids = [c for c in all_centroids[cell_id_int][:frame_idx + 1] if c is not None]
+                if centroids:
+                    track = np.array(centroids)
+                    color = colors[cell_id_int]
+                    ax.plot(track[:, 0], track[:, 1], '-',
+                            color=color, linewidth=self.config.line_width,
+                            alpha=self.config.alpha)
+                    ax.plot(track[:, 0], track[:, 1], 'o',
+                            color=color, markersize=3)
+                    if len(track) > 0:
+                        ax.text(track[-1, 0], track[-1, 1], str(cell_id_int),
+                                color=color, fontsize=self.config.font_size,
+                                ha='left', va='bottom')
+
+            ax.set_title(f'Frame {frame_idx}', color='white')
+            ax.axis('off')
+
+        logger.debug("Creating animation")
+        anim = FuncAnimation(fig, update, frames=len(segmentation_stack),
+                             interval=self.config.animation_interval, blit=False)
+
+        logger.debug(f"Saving animation to {output_path}")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        anim.save(str(output_path), writer='pillow', savefig_kwargs={'facecolor': 'black'})
+        plt.close()
+        logger.debug("Tracking animation completed")
+
+    def plot_intercalation_event(self, event: 'IntercalationEvent', output_path: Path):
+        """Create a static visualization of an intercalation event"""
+        plt.figure(figsize=self.config.figure_size)
+
+        # Plot the event coordinates
+        plt.scatter(event.coordinates[1], event.coordinates[0], c='red', s=100)
+
+        # Add labels for the cells involved
+        plt.annotate(f"Losing cells: {event.losing_cells}",
+                     (event.coordinates[1], event.coordinates[0]),
+                     xytext=(10, 10), textcoords='offset points')
+        plt.annotate(f"Gaining cells: {event.gaining_cells}",
+                     (event.coordinates[1], event.coordinates[0]),
+                     xytext=(10, -10), textcoords='offset points')
+
+        plt.title(f"Intercalation Event at Frame {event.frame}")
+        plt.axis('equal')
+        plt.savefig(output_path)
+        plt.close()
+
+    def plot_edge_analysis(self, edge_data: 'EdgeData', output_path: Path):
+        """Create a comprehensive visualization of edge evolution"""
+        plt.figure(figsize=self.config.figure_size)
+
+        # Plot length evolution
+        plt.plot(edge_data.frames, edge_data.lengths, '-b', label='Edge length')
+
+        # Mark intercalation events
+        if hasattr(edge_data, 'intercalations') and edge_data.intercalations:
+            event_frames = [event.frame for event in edge_data.intercalations]
+            event_lengths = [edge_data.lengths[edge_data.frames.index(frame)]
+                             for frame in event_frames]
+            plt.scatter(event_frames, event_lengths, c='red', s=100,
+                        label='Intercalation events')
+
+        plt.xlabel('Frame')
+        plt.ylabel('Edge Length')
+        plt.title(f'Edge {edge_data.edge_id} Analysis')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(output_path)
+        plt.close()
 
     def _create_custom_colormap(self, start_color: Tuple[float, float, float, float] = (0, 0, 0, 1)):
         """Create a custom colormap starting with a specific color"""
@@ -405,18 +707,17 @@ class Visualizer:
         anim.save(str(output_path), writer='pillow')
         plt.close()
 
-    def plot_edge_length_tracks(self, trajectories: Dict[int, 'EdgeTrajectory'],
+    def plot_edge_length_tracks(self, trajectories: Dict[int, 'EdgeData'],
                                 output_path: Path) -> None:
         """Plot edge length trajectories in groups of 10."""
         edge_ids = sorted(trajectories.keys())
         num_groups = (len(edge_ids) + 9) // 10
 
         fig, axes = plt.subplots(num_groups, 1, figsize=(15, 5 * num_groups))
-        # Set white background and black text/axes
+        fig.patch.set_facecolor('white')
 
         if num_groups > 1:
             for ax in axes.flatten():
-                # Set white background and black text/axes
                 ax.set_facecolor('white')
                 ax.spines['bottom'].set_color('black')
                 ax.spines['top'].set_color('black')
@@ -424,37 +725,43 @@ class Visualizer:
                 ax.spines['right'].set_color('black')
                 ax.tick_params(colors='black')
         else:
-            axes.set_facecolor('white')
-            axes.spines['bottom'].set_color('black')
-            axes.spines['top'].set_color('black')
-            axes.spines['left'].set_color('black')
-            axes.spines['right'].set_color('black')
-            axes.tick_params(colors='black')
-
-        if num_groups == 1:
-            axes = [axes]
+            if not isinstance(axes, np.ndarray):
+                axes = np.array([axes])
+            axes[0].set_facecolor('white')
+            axes[0].spines['bottom'].set_color('black')
+            axes[0].spines['top'].set_color('black')
+            axes[0].spines['left'].set_color('black')
+            axes[0].spines['right'].set_color('black')
+            axes[0].tick_params(colors='black')
 
         for group_idx in range(num_groups):
-            ax = axes[group_idx]
+            ax = axes[group_idx] if num_groups > 1 else axes[0]
             start_idx = group_idx * 10
             group_edges = edge_ids[start_idx:start_idx + 10]
 
             for edge_id in group_edges:
-                traj = trajectories[edge_id]
-                color = 'red' if traj.intercalation_frames else 'gray'
-                ax.plot(traj.frames, traj.lengths, '-',
+                edge_data = trajectories[edge_id]
+                # Check for intercalations using the intercalations list
+                has_intercalations = (hasattr(edge_data, 'intercalations') and
+                                      edge_data.intercalations is not None and
+                                      len(edge_data.intercalations) > 0)
+
+                color = 'red' if has_intercalations else 'gray'
+                ax.plot(edge_data.frames, edge_data.lengths, '-',
                         color=color, label=f'Edge {edge_id}')
 
-                if traj.intercalation_frames:
-                    for frame in traj.intercalation_frames:
-                        ax.axvline(x=frame, color='blue',
+                # Plot vertical lines for intercalation events
+                if has_intercalations:
+                    for event in edge_data.intercalations:
+                        ax.axvline(x=event.frame, color='blue',
                                    linestyle='--', alpha=0.3)
 
-            ax.set_xlabel('Frame')
-            ax.set_ylabel('Edge Length (µm)')
-            ax.grid(True, alpha=0.3)
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            ax.set_facecolor('white')
+                ax.set_xlabel('Frame', color='black')
+                ax.set_ylabel('Edge Length (µm)', color='black')
+                ax.grid(True, alpha=0.3)
+                ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                ax.set_title(f'Edges {start_idx + 1}-{min(start_idx + 10, len(edge_ids))}',
+                             color='black')
 
         plt.tight_layout()
         plt.savefig(output_path, bbox_inches='tight', dpi=self.config.dpi,
@@ -518,182 +825,7 @@ class Visualizer:
                   savefig_kwargs={'facecolor': 'white'})
         plt.close()
 
-    # def plot_edge_length_distribution(self, csv_path: Path, output_path: Path) -> None:
-    #     """Create distribution plot of edge lengths with log(1/probability) on y-axis."""
-    #     df = pd.read_csv(csv_path)
-    #     lengths = df['length'].values
-    #     hist, bin_edges = np.histogram(lengths, bins=self.config.histogram_bins, density=True)
-    #     bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    #     epsilon = 1e-10
-    #     log_inverse_prob = np.log(1 / (hist + epsilon))
-    #
-    #     plt.figure(figsize=self.config.figure_size)
-    #
-    #     # Set white background and black text/axes
-    #     ax = plt.gca()
-    #     ax.set_facecolor('white')
-    #     plt.gcf().patch.set_facecolor('white')
-    #     ax.spines['bottom'].set_color('black')
-    #     ax.spines['top'].set_color('black')
-    #     ax.spines['left'].set_color('black')
-    #     ax.spines['right'].set_color('black')
-    #     ax.tick_params(colors='black')
-    #
-    #     plt.plot(bin_centers, log_inverse_prob, '-o',
-    #              color='blue',
-    #              alpha=self.config.alpha,
-    #              linewidth=self.config.line_width,
-    #              markersize=4)
-    #
-    #     plt.xlabel('Edge Length (μm)', color='black')
-    #     plt.ylabel('log(1/probability)', color='black')
-    #     plt.title('Edge Length Distribution', color='black')
-    #     plt.grid(True, alpha=0.3)
-    #
-    #     plt.savefig(output_path, dpi=self.config.dpi, bbox_inches='tight',
-    #                 facecolor='white', edgecolor='none')
-    #     plt.close()
-    #
-    #     logger.info(f"Edge length distribution plot saved to {output_path}")
 
-    def create_visualizations(self, results: 'AnalysisResults', input_path: Path = None):
-        """Create all visualizations from analysis results"""
-        logger.info("Starting visualization generation")
-
-        # Check if any visualizations are enabled before setting up directories
-        if not any([
-            self.config.tracking_plots_enabled,
-            self.config.edge_detection_overlay,
-            self.config.intercalation_events,
-            self.config.edge_length_evolution
-        ]):
-            logger.info("No visualizations enabled in configuration. Skipping visualization generation.")
-            return
-
-        # Set up base output directory based on input file name
-        if input_path:
-            base_dir = input_path.parent / input_path.stem / "visualizations"
-        else:
-            base_dir = self.config.output_dir if self.config.output_dir else Path.cwd()
-
-        # Only create directories for enabled visualizations that have available data
-        directories_to_create = []
-
-        if results.tracked_stack is not None and self.config.tracking_plots_enabled:
-            directories_to_create.append(base_dir / "tracking_output")
-            logger.info("Will create tracking visualizations")
-
-        if (results.tracked_stack is not None and
-                results.boundaries is not None and
-                self.config.edge_detection_overlay):
-            directories_to_create.append(base_dir / "edge_output")
-            logger.info("Will create edge detection visualizations")
-
-        if results.events is not None and self.config.intercalation_events:
-            directories_to_create.append(base_dir / "intercalation_output")
-            logger.info("Will create intercalation visualizations")
-
-        if results.trajectories is not None and self.config.edge_length_evolution:
-            directories_to_create.append(base_dir / "edge_analysis_output")
-            logger.info("Will create edge analysis visualizations")
-
-        # If no directories to create after checking data availability, return early
-        if not directories_to_create:
-            logger.info("No visualizations to generate with available data.")
-            return
-
-        # Create parent directory and subdirectories
-        base_dir.mkdir(parents=True, exist_ok=True)
-        logger.debug(f"Created parent directory: {base_dir}")
-
-        for directory in directories_to_create:
-            directory.mkdir(exist_ok=True)
-            logger.debug(f"Created directory: {directory}")
-
-        # Generate enabled visualizations
-        if results.tracked_stack is not None and self.config.tracking_plots_enabled:
-            logger.info("Creating tracking visualizations")
-            tracking_dir = base_dir / "tracking_output"
-            self.visualize_cell_tracks(
-                results.tracked_stack,
-                tracking_dir / "cell_trajectories.png"
-            )
-            self.create_tracking_animation(
-                results.tracked_stack,
-                tracking_dir / "tracking_animation.gif"
-            )
-
-        if (results.tracked_stack is not None and
-                results.boundaries is not None and
-                self.config.edge_detection_overlay):
-            logger.info("Creating edge detection visualizations")
-            edge_dir = base_dir / "edge_output"
-            self.visualize_boundaries(
-                results.tracked_stack,
-                results.boundaries,
-                edge_dir / "edge_detection.gif"
-            )
-
-        if results.events is not None and self.config.intercalation_events:
-            logger.info("Creating intercalation visualizations")
-            vis_dir = base_dir / "intercalation_output"
-
-            for i, event in enumerate(results.events):
-                self.visualize_intercalation_event(
-                    event,
-                    results.tracked_stack[event.frame],
-                    results.tracked_stack[event.frame + 1],
-                    vis_dir / f"event_{i:03d}.png"
-                )
-
-                if self.config.create_example_gifs and results.boundaries is not None:
-                    self.create_intercalation_animation(
-                        results.tracked_stack,
-                        results.boundaries,
-                        results.events,
-                        vis_dir
-                    )
-
-        if results.trajectories is not None and self.config.edge_length_evolution:
-            logger.info("Creating edge analysis visualizations")
-            edge_analysis_dir = base_dir / "edge_analysis_output"
-            plots_dir = edge_analysis_dir
-
-            # Create basic edge length evolution plot
-            self.plot_edge_length_tracks(
-                results.trajectories,
-                plots_dir / "length_tracks.png"
-            )
-
-            if (results.tracked_stack is not None and
-                    results.boundaries is not None and
-                    self.config.create_example_gifs):
-                example_dir = plots_dir / "examples"
-                example_dir.mkdir(exist_ok=True)
-
-                # Choose interesting edges (with intercalations)
-                interesting_edges = [
-                                        edge_id for edge_id, traj in results.trajectories.items()
-                                        if traj.intercalation_frames
-                                    ][:self.config.max_example_gifs]
-
-                # Add some regular edges if we don't have enough interesting ones
-                if len(interesting_edges) < self.config.max_example_gifs:
-                    regular_edges = [
-                                        edge_id for edge_id, traj in results.trajectories.items()
-                                        if not traj.intercalation_frames
-                                    ][:self.config.max_example_gifs - len(interesting_edges)]
-                    interesting_edges.extend(regular_edges)
-
-                for edge_id in interesting_edges:
-                    self.create_edge_evolution_animation(
-                        results.tracked_stack,
-                        results.trajectories[edge_id],
-                        results.boundaries,
-                        example_dir / f"edge_{edge_id}_evolution.gif"
-                    )
-
-        logger.info(f"Visualization generation completed. Output saved to {base_dir}")
 
 
 if __name__ == "__main__":

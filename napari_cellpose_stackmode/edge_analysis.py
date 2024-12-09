@@ -140,97 +140,115 @@ class EdgeAnalyzer:
 
     def _create_edge_trajectories(self, boundaries_by_frame: Dict[int, List[CellBoundary]],
                                   intercalations: List[IntercalationEvent]) -> Dict[int, EdgeData]:
-        logger.debug(f"Processing {len(intercalations)} total intercalation events")
-        trajectories = {}
+        """
+        Create edge trajectories with forward-time merging logic.
 
-        logger.debug(f"Number of edge groups: {len(self._edge_groups)}")
-        logger.debug(f"All intercalation events: {[(e.frame, e.losing_cells, e.gaining_cells) for e in intercalations]}")
+        Args:
+            boundaries_by_frame: Dictionary mapping frame numbers to detected boundaries
+            intercalations: List of detected intercalation events
 
-        # Process each edge group
-        for group in self._edge_groups.values():
-            if not group.active:
-                logger.debug(f"Skipping inactive group {group.group_id}")
-                continue
+        Returns:
+            Dictionary mapping edge IDs to EdgeData objects
+        """
+        logger.info("Creating edge trajectories with forward-time merging...")
 
-            logger.debug(f"Processing group {group.group_id} with {len(group.edge_ids)} edges")
-            logger.debug(f"Group {group.group_id} cell pairs: {group.cell_pairs}")
+        # Sort intercalations chronologically
+        sorted_events = sorted(intercalations, key=lambda x: x.frame)
 
-            # Combine all edge data in group
-            combined_data = None
-            for edge_id in group.edge_ids:
-                logger.debug(f"Processing edge {edge_id} in group {group.group_id}")
-                if edge_id in self._edge_history:
-                    if combined_data is None:
-                        base = self._edge_history[edge_id]
-                        combined_data = EdgeData(
-                            edge_id=base.edge_id,
-                            frames=base.frames.copy(),
-                            cell_pairs=base.cell_pairs.copy(),
-                            lengths=base.lengths.copy(),
-                            coordinates=base.coordinates.copy()
-                        )
-                        logger.debug(f"Created initial combined data from edge {edge_id} with frames {base.frames}")
-                    else:
-                        self._merge_edge_data(combined_data, self._edge_history[edge_id])
-                        logger.debug(f"Merged data from edge {edge_id}")
-                else:
-                    logger.debug(f"Edge {edge_id} not found in edge history")
+        # Track edge chains: maps cell pair to current trajectory ID
+        edge_trajectories = {}  # final container for trajectories
+        cell_pair_to_trajectory = {}  # maps frozen cell pairs to trajectory IDs
+        next_trajectory_id = 1
 
-            if combined_data is not None:
-                # Add intercalation information
-                frame_set = set(combined_data.frames)
-                relevant_events = []
+        # First pass: Process all intercalation events chronologically
+        logger.debug(f"Processing {len(sorted_events)} intercalation events")
+        for event in sorted_events:
+            losing_pair = frozenset(event.losing_cells)
+            gaining_pair = frozenset(event.gaining_cells)
 
-                for event in intercalations:
-                    logger.debug(f"Checking event at frame {event.frame} with cells "
-                                 f"losing: {event.losing_cells}, gaining: {event.gaining_cells}")
+            # Check if either edge is already part of a trajectory
+            losing_traj_id = cell_pair_to_trajectory.get(losing_pair)
 
-                    # Convert the cell pairs to normalized form
-                    losing_pair = self._normalize_cell_pair(event.losing_cells)[0]
-                    gaining_pair = self._normalize_cell_pair(event.gaining_cells)[0]
-
-                    logger.debug(f"Normalized pairs - losing: {losing_pair}, gaining: {gaining_pair}")
-                    logger.debug(f"Group cell pairs: {group.cell_pairs}")
-
-                    # Check if event belongs to this group
-                    if losing_pair in group.cell_pairs or gaining_pair in group.cell_pairs:
-                        logger.debug(f"Found matching intercalation for group {group.group_id}")
-                        relevant_events.append(event)
-
-                if relevant_events:
-                    logger.debug(f"Adding {len(relevant_events)} intercalations to edge {combined_data.edge_id}")
-                    combined_data.intercalations = relevant_events
-
-                trajectories[combined_data.edge_id] = combined_data
-                logger.debug(f"Added trajectory for edge {combined_data.edge_id}")
-
-        # Add edges not in any group
-        logger.debug("Processing edges not in groups")
-        ungrouped_count = 0
-        for edge_id, data in self._edge_history.items():
-            if edge_id not in self._edge_to_group:
-                logger.debug(f"Adding ungrouped edge {edge_id}")
-                trajectories[edge_id] = EdgeData(
-                    edge_id=data.edge_id,
-                    frames=data.frames.copy(),
-                    cell_pairs=data.cell_pairs.copy(),
-                    lengths=data.lengths.copy(),
-                    coordinates=data.coordinates.copy()
+            if losing_traj_id is None:
+                # Create new trajectory for the losing edge
+                losing_traj_id = next_trajectory_id
+                next_trajectory_id += 1
+                edge_trajectories[losing_traj_id] = EdgeData(
+                    edge_id=losing_traj_id,
+                    frames=[],
+                    cell_pairs=[],
+                    lengths=[],
+                    coordinates=[],
+                    intercalations=[event]
                 )
-                ungrouped_count += 1
+                cell_pair_to_trajectory[losing_pair] = losing_traj_id
+            else:
+                # Add event to existing trajectory
+                edge_trajectories[losing_traj_id].intercalations.append(event)
 
-        logger.debug(f"Added {ungrouped_count} ungrouped edges")
+            # Map gaining edge to same trajectory
+            cell_pair_to_trajectory[gaining_pair] = losing_traj_id
 
-        # Final counts
-        edges_with_intercalations = sum(1 for edge in trajectories.values() if hasattr(edge, 'intercalations') and edge.intercalations)
-        total_intercalations = sum(len(edge.intercalations) for edge in trajectories.values()
-                                   if hasattr(edge, 'intercalations') and edge.intercalations)
+            logger.debug(f"Merged trajectory {losing_traj_id}: {event.losing_cells} → {event.gaining_cells}")
 
-        logger.debug(f"Created {len(trajectories)} total trajectories")
-        logger.debug(f"Final trajectories contain {edges_with_intercalations} edges with intercalations")
-        logger.debug(f"Total intercalation events in trajectories: {total_intercalations}")
+        # Second pass: Process all boundaries chronologically
+        logger.debug("Processing boundaries frame by frame")
+        for frame, boundaries in sorted(boundaries_by_frame.items()):
+            for boundary in boundaries:
+                cell_pair = frozenset(boundary.cell_ids)
 
-        return trajectories
+                # Get or create trajectory ID for this edge
+                if cell_pair not in cell_pair_to_trajectory:
+                    # This is a non-intercalating edge or first occurrence
+                    traj_id = next_trajectory_id
+                    next_trajectory_id += 1
+                    cell_pair_to_trajectory[cell_pair] = traj_id
+                    edge_trajectories[traj_id] = EdgeData(
+                        edge_id=traj_id,
+                        frames=[],
+                        cell_pairs=[],
+                        lengths=[],
+                        coordinates=[],
+                        intercalations=[]
+                    )
+
+                traj_id = cell_pair_to_trajectory[cell_pair]
+                trajectory = edge_trajectories[traj_id]
+
+                # Determine sign based on intercalation events
+                sign = 1
+                for event in trajectory.intercalations:
+                    if frame > event.frame:
+                        sign *= -1
+
+                # Add boundary data to trajectory
+                trajectory.frames.append(frame)
+                trajectory.cell_pairs.append(tuple(sorted(boundary.cell_ids)))
+                trajectory.lengths.append(sign * boundary.length)
+                trajectory.coordinates.append(boundary.coordinates)
+
+        # Count statistics
+        intercalating_edges = sum(1 for t in edge_trajectories.values() if t.intercalations)
+        total_intercalations = sum(len(t.intercalations) for t in edge_trajectories.values())
+
+        logger.info(f"Created {len(edge_trajectories)} edge trajectories")
+        logger.debug(f"Found {intercalating_edges} edges involved in intercalations")
+        logger.debug(f"Total intercalation events processed: {total_intercalations}")
+
+        return edge_trajectories
+
+    def _get_unique_edge_id(self, cells_before: Tuple[int, int], cells_after: Tuple[int, int]) -> frozenset:
+        """
+        Create unique identifier for an edge that can undergo multiple intercalations.
+
+        Args:
+            cells_before: Tuple of cell IDs before intercalation
+            cells_after: Tuple of cell IDs after intercalation
+
+        Returns:
+            frozenset containing both cell pairs as frozen sets
+        """
+        return frozenset([frozenset(cells_before), frozenset(cells_after)])
 
     def _merge_edge_groups(self, lost_edge: FrozenSet[int], gained_edge: FrozenSet[int], frame: int):
         # Find all groups that contain either edge or any historically related edges

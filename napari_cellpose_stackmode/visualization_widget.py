@@ -35,7 +35,7 @@ class VisualizationWidget(QWidget):
         self.data_manager = data_manager
         self.visualization_manager = visualization_manager
         self.config = VisualizationConfig()
-        self.visualizer = Visualizer()
+        self.visualizer = Visualizer(config=self.config, napari_viewer=self.viewer)
         self._loading_config = False
         self.setup_ui()
 
@@ -221,7 +221,9 @@ class VisualizationWidget(QWidget):
     def _generate_visualizations(self):
         """Generate visualizations based on current configuration"""
         try:
-            # Check if any visualizations are enabled first
+            logger.debug("Starting visualization generation")
+
+            # Check if any visualizations are enabled
             any_vis_enabled = (
                     self.config.tracking_plots_enabled or
                     self.config.edge_detection_overlay or
@@ -237,12 +239,15 @@ class VisualizationWidget(QWidget):
             self.generate_button.setEnabled(False)
             self._update_status("Generating visualizations...")
 
-            # Get output directory from file dialog
+            # Get output directory
             output_dir = self._get_output_directory()
             if output_dir is None:
+                logger.debug("No output directory selected")
                 return
 
-            # Create a new config with the output directory
+            logger.debug(f"Selected output directory: {output_dir}")
+
+            # Create new config with output directory
             new_config = VisualizationConfig(
                 tracking_plots_enabled=self.config.tracking_plots_enabled,
                 edge_detection_overlay=self.config.edge_detection_overlay,
@@ -253,18 +258,27 @@ class VisualizationWidget(QWidget):
                 output_dir=output_dir
             )
 
-            # Create a new visualizer with the updated config
-            visualizer = Visualizer(config=new_config)
+            # Create visualizer with viewer
+            visualizer = Visualizer(config=new_config, napari_viewer=self.viewer)
+            logger.debug("Created new visualizer with config and viewer")
 
-            # Check if required data is available
+            # Check for analysis results
             if self.data_manager.analysis_results is None:
                 raise ValueError("Analysis results not available. Please complete analysis steps first.")
 
-            # Use the existing analysis results directly
-            analysis_results = self.data_manager.analysis_results
-
             # Generate visualizations
-            visualizer.create_visualizations(analysis_results)
+            logger.debug(f"Analysis results available: {self.data_manager.analysis_results is not None}")
+            if self.data_manager.analysis_results:
+                logger.debug(f"Number of edges in results: {len(self.data_manager.analysis_results.edges)}")
+
+            logger.debug("Enabled visualizations:")
+            logger.debug(f"- Tracking plots: {self.config.tracking_plots_enabled}")
+            logger.debug(f"- Edge detection overlay: {self.config.edge_detection_overlay}")
+            logger.debug(f"- Intercalation events: {self.config.intercalation_events}")
+            logger.debug(f"- Edge length evolution: {self.config.edge_length_evolution}")
+
+            logger.debug("Starting visualization creation")
+            visualizer.create_visualizations(self.data_manager.analysis_results)
 
             self._update_status(f"Visualizations generated successfully in {output_dir}")
             self.visualization_completed.emit()
@@ -277,7 +291,6 @@ class VisualizationWidget(QWidget):
             self.visualization_failed.emit(error_msg)
 
         finally:
-            # Re-enable button
             self.generate_button.setEnabled(True)
 
     def _get_output_directory(self) -> Optional[Path]:
