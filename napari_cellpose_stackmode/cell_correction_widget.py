@@ -17,7 +17,10 @@ from qtpy.QtWidgets import (
 from .debug_logging import logger, log_operation
 
 logger = logging.getLogger(__name__)
-
+#############################
+# TODO
+# Remove the left click delete cells
+#############################
 
 @dataclass
 class UndoAction:

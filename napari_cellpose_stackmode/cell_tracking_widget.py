@@ -178,32 +178,32 @@ class CellTrackingWidget(BaseAnalysisWidget):
         self.gap_frames_spin.setValue(self.tracking_params.max_frame_gap)
         self._update_status("Parameters reset to defaults")
 
-    def get_parameters(self) -> TrackingParameters:
-        """Get current tracking parameters"""
-        return TrackingParameters(
-            min_overlap_ratio=self.overlap_spin.value(),
-            max_displacement=self.displacement_spin.value(),
-            min_cell_size=self.cell_size_spin.value(),
-            enable_gap_closing=self.gap_closing_check.isChecked(),
-            max_frame_gap=self.gap_frames_spin.value()
-        )
-
-    def set_parameters(self, params: TrackingParameters):
-        """Set tracking parameters and update UI"""
-        try:
-            params.validate()
-            logger.debug(f"Setting tracking parameters: {params}")
-
-            self.overlap_spin.setValue(params.min_overlap_ratio)
-            self.displacement_spin.setValue(params.max_displacement)
-            self.cell_size_spin.setValue(params.min_cell_size)
-            self.gap_closing_check.setChecked(params.enable_gap_closing)
-            self.gap_frames_spin.setValue(params.max_frame_gap)
-
-            self.tracking_params = params
-            self.tracker.update_parameters(params)
-            self.parameters_updated.emit()
-
-        except ValueError as e:
-            logger.error(f"Invalid parameters: {e}")
-            raise
+    # def get_parameters(self) -> TrackingParameters:
+    #     """Get current tracking parameters"""
+    #     return TrackingParameters(
+    #         min_overlap_ratio=self.overlap_spin.value(),
+    #         max_displacement=self.displacement_spin.value(),
+    #         min_cell_size=self.cell_size_spin.value(),
+    #         enable_gap_closing=self.gap_closing_check.isChecked(),
+    #         max_frame_gap=self.gap_frames_spin.value()
+    #     )
+    #
+    # def set_parameters(self, params: TrackingParameters):
+    #     """Set tracking parameters and update UI"""
+    #     try:
+    #         params.validate()
+    #         logger.debug(f"Setting tracking parameters: {params}")
+    #
+    #         self.overlap_spin.setValue(params.min_overlap_ratio)
+    #         self.displacement_spin.setValue(params.max_displacement)
+    #         self.cell_size_spin.setValue(params.min_cell_size)
+    #         self.gap_closing_check.setChecked(params.enable_gap_closing)
+    #         self.gap_frames_spin.setValue(params.max_frame_gap)
+    #
+    #         self.tracking_params = params
+    #         self.tracker.update_parameters(params)
+    #         self.parameters_updated.emit()
+    #
+    #     except ValueError as e:
+    #         logger.error(f"Invalid parameters: {e}")
+    #         raise

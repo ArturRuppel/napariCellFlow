@@ -1,30 +1,22 @@
-from qtpy.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
-                            QProgressBar, QFileDialog, QMessageBox, QHBoxLayout,
-                            QFormLayout, QSpinBox, QDoubleSpinBox, QCheckBox)
-from qtpy.QtCore import Signal
-import napari
-from pathlib import Path
 import logging
+from pathlib import Path
 from typing import Optional
 
-from .edge_analysis import EdgeAnalyzer
+import napari
+from qtpy.QtWidgets import (QPushButton, QFileDialog, QMessageBox, QHBoxLayout, QFormLayout,
+                            QSpinBox, QDoubleSpinBox, QCheckBox)
+
+from .base_widget import BaseAnalysisWidget, ProcessingError
 from .data_manager import DataManager
-from .visualization_manager import VisualizationManager
+from .edge_analysis import EdgeAnalyzer
 from .structure import EdgeAnalysisParams, CellBoundary
+from .visualization_manager import VisualizationManager
 
 logger = logging.getLogger(__name__)
 
 
-class EdgeAnalysisWidget(QWidget):
-    """
-    Unified widget for edge detection and analysis operations.
-    Combines edge detection, intercalation detection, and edge analysis.
-    """
-
-    edges_detected = Signal(object)  # Emits detected boundaries
-    analysis_completed = Signal(object)  # Emits EdgeAnalysisResults
-    analysis_failed = Signal(str)
-    parameters_updated = Signal()
+class EdgeAnalysisWidget(BaseAnalysisWidget):
+    """Widget for edge detection and analysis operations."""
 
     def __init__(
             self,
@@ -32,73 +24,68 @@ class EdgeAnalysisWidget(QWidget):
             data_manager: DataManager,
             visualization_manager: VisualizationManager
     ):
-        super().__init__()
-        self.viewer = viewer
-        self.data_manager = data_manager
-        self.visualization_manager = visualization_manager
+        super().__init__(viewer, data_manager, visualization_manager, "Edge Analysis")
 
-        # Initialize parameters before setup_ui
         self.params = EdgeAnalysisParams()
-
-        # Initialize analyzer with params
         self.analyzer = EdgeAnalyzer()
         self.analyzer.update_parameters(self.params)
 
-        self.setup_ui()
-        self.connect_signals()
+        self._current_results = None
+        self._current_boundaries = None
 
-    def setup_ui(self):
-        """Initialize the user interface"""
-        layout = QVBoxLayout()
-        self.setLayout(layout)
+        self._setup_ui()
 
-        # Title
-        title = QLabel("Edge Analysis")
-        title.setStyleSheet("font-weight: bold; font-size: 12px;")
-        layout.addWidget(title)
-
+    def _setup_ui(self):
+        """Initialize the edge analysis-specific UI elements"""
         # Parameters section
-        param_group = QFormLayout()
+        param_layout = QFormLayout()
 
         # Edge detection parameters
         self.dilation_spin = QSpinBox()
         self.dilation_spin.setRange(1, 10)
         self.dilation_spin.setValue(self.params.dilation_radius)
         self.dilation_spin.setToolTip("Radius for morphological dilation when finding boundaries")
-        param_group.addRow("Dilation Radius:", self.dilation_spin)
+        self.register_control(self.dilation_spin)
+        param_layout.addRow("Dilation Radius:", self.dilation_spin)
 
         self.overlap_spin = QSpinBox()
         self.overlap_spin.setRange(1, 100)
         self.overlap_spin.setValue(self.params.min_overlap_pixels)
         self.overlap_spin.setToolTip("Minimum number of overlapping pixels to consider cells as neighbors")
-        param_group.addRow("Min Overlap Pixels:", self.overlap_spin)
+        self.register_control(self.overlap_spin)
+        param_layout.addRow("Min Overlap Pixels:", self.overlap_spin)
 
         self.min_length_spin = QDoubleSpinBox()
         self.min_length_spin.setRange(0.0, 1000.0)
         self.min_length_spin.setValue(self.params.min_edge_length)
         self.min_length_spin.setSingleStep(0.5)
         self.min_length_spin.setToolTip("Minimum edge length in pixels (0 to disable)")
-        param_group.addRow("Min Edge Length:", self.min_length_spin)
+        self.register_control(self.min_length_spin)
+        param_layout.addRow("Min Edge Length:", self.min_length_spin)
 
         self.filter_isolated_check = QCheckBox()
         self.filter_isolated_check.setChecked(self.params.filter_isolated)
         self.filter_isolated_check.setToolTip("Filter out edges that don't connect to others")
-        param_group.addRow("Filter Isolated:", self.filter_isolated_check)
+        self.register_control(self.filter_isolated_check)
+        param_layout.addRow("Filter Isolated:", self.filter_isolated_check)
 
         # Intercalation parameters
         self.temporal_window_spin = QSpinBox()
         self.temporal_window_spin.setRange(1, 10)
         self.temporal_window_spin.setValue(self.params.temporal_window)
         self.temporal_window_spin.setToolTip("Number of frames to consider for temporal analysis")
-        param_group.addRow("Temporal Window:", self.temporal_window_spin)
+        self.register_control(self.temporal_window_spin)
+        param_layout.addRow("Temporal Window:", self.temporal_window_spin)
 
         self.min_contact_spin = QSpinBox()
         self.min_contact_spin.setRange(1, 10)
         self.min_contact_spin.setValue(self.params.min_contact_frames)
         self.min_contact_spin.setToolTip("Minimum frames of contact required")
-        param_group.addRow("Min Contact Frames:", self.min_contact_spin)
+        self.register_control(self.min_contact_spin)
+        param_layout.addRow("Min Contact Frames:", self.min_contact_spin)
 
-        layout.addLayout(param_group)
+        # Add parameter layout to main layout
+        self.main_layout.addLayout(param_layout)
 
         # Button layout
         button_layout = QHBoxLayout()
@@ -120,30 +107,17 @@ class EdgeAnalysisWidget(QWidget):
         self.reset_btn.clicked.connect(self.reset_parameters)
         button_layout.addWidget(self.reset_btn)
 
-        layout.addLayout(button_layout)
+        self.main_layout.addLayout(button_layout)
 
-        # Progress and status
-        self.progress_bar = QProgressBar()
-        layout.addWidget(self.progress_bar)
-
-        self.status_label = QLabel("")
-        layout.addWidget(self.status_label)
-
-        layout.addStretch()
-
-    def connect_signals(self):
-        """Connect parameter control signals"""
+        # Connect parameter control signals
         self.dilation_spin.valueChanged.connect(self.update_parameters)
         self.overlap_spin.valueChanged.connect(self.update_parameters)
         self.min_length_spin.valueChanged.connect(self.update_parameters)
         self.filter_isolated_check.stateChanged.connect(self.update_parameters)
         self.temporal_window_spin.valueChanged.connect(self.update_parameters)
         self.min_contact_spin.valueChanged.connect(self.update_parameters)
-        self.edges_detected.connect(self.visualization_manager.update_edge_visualization)
-        self.analysis_completed.connect(self.visualization_manager.update_edge_analysis_visualization)
 
     def update_parameters(self):
-        """Update analysis parameters from UI controls"""
         try:
             new_params = EdgeAnalysisParams(
                 dilation_radius=self.dilation_spin.value(),
@@ -158,70 +132,45 @@ class EdgeAnalysisWidget(QWidget):
             self.params = new_params
             self.analyzer.update_parameters(new_params)
 
-            self.analyze_btn.setEnabled(True)
-            self.status_label.setText("Parameters updated")
             self.parameters_updated.emit()
 
         except ValueError as e:
-            self.analyze_btn.setEnabled(False)
-            self.status_label.setText(f"Invalid parameters: {str(e)}")
-            logger.warning(f"Invalid parameter combination: {str(e)}")
+            raise ProcessingError(
+                message=f"Invalid parameters: {str(e)}",
+                component=self.__class__.__name__
+            )
 
     def run_analysis(self):
-        """Run unified edge analysis on the selected label layer"""
-        selected = self.viewer.layers.selection.active
+        selected = self._get_active_labels_layer()
 
         if selected is None:
-            QMessageBox.warning(self, "Warning", "Please select a label layer for edge analysis")
-            return
-
-        if not isinstance(selected, napari.layers.Labels):
-            QMessageBox.warning(self, "Warning", "The selected layer must be a label layer")
-            return
+            raise ProcessingError(
+                message="Please select a label layer for edge analysis",
+                component=self.__class__.__name__
+            )
 
         try:
+            self._processing = True
             self._set_controls_enabled(False)
             self._update_status("Starting edge analysis...", 10)
 
-            # Clear previous visualizations
-            self.visualization_manager.clear_edge_layers()
+            self.vis_manager.clear_edge_layers()
 
-            # Run analysis on the selected label layer
             results = self.analyzer.analyze_sequence(selected.data)
             self._current_results = results
 
             self._update_status("Processing results...", 50)
 
-            # Store results in data manager
             self.data_manager.analysis_results = results
 
-            # Create a boundaries dictionary for edge detection visualization
-            boundaries_by_frame = {}
-            for edge_id, edge in results.edges.items():
-                for frame_idx, frame in enumerate(edge.frames):
-                    if frame not in boundaries_by_frame:
-                        boundaries_by_frame[frame] = []
-
-                    # Create CellBoundary object for this frame
-                    boundary = CellBoundary(
-                        cell_ids=edge.cell_pairs[frame_idx],
-                        coordinates=edge.coordinates[frame_idx],
-                        endpoint1=edge.coordinates[frame_idx][0],
-                        endpoint2=edge.coordinates[frame_idx][-1],
-                        length=edge.lengths[frame_idx]
-                    )
-                    boundaries_by_frame[frame].append(boundary)
-
+            boundaries_by_frame = self._extract_boundaries(results)
             self._current_boundaries = boundaries_by_frame
 
-            # Update visualizations in sequence - this creates three separate layers
-            self.visualization_manager.update_edge_visualization(boundaries_by_frame)  # Initial edge detection
-            self.visualization_manager.update_intercalation_visualization(results)  # Intercalation events
-            self.visualization_manager.update_edge_analysis_visualization(results)  # Final analyzed edges
+            self.vis_manager.update_edge_visualization(boundaries_by_frame)
+            self.vis_manager.update_intercalation_visualization(results)
+            self.vis_manager.update_edge_analysis_visualization(results)
 
-            # Emit signals
-            self.edges_detected.emit(boundaries_by_frame)
-            self.analysis_completed.emit(results)
+            self.processing_completed.emit(results)
 
             intercalation_count = sum(
                 len(edge.intercalations)
@@ -233,18 +182,47 @@ class EdgeAnalysisWidget(QWidget):
                 f"Analysis complete - found {len(results.edges)} edges and {intercalation_count} intercalations",
                 100
             )
-            self.save_btn.setEnabled(True)
 
+        except ProcessingError as e:
+            self._handle_error(e)
         except Exception as e:
-            error_msg = f"Edge analysis failed: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            QMessageBox.critical(self, "Error", error_msg)
-            self._update_status("Analysis failed", 0)
-            self.analysis_failed.emit(error_msg)
-            self.save_btn.setEnabled(False)
-
+            self._handle_error(ProcessingError(
+                message="Unexpected error during edge analysis",
+                details=str(e),
+                component=self.__class__.__name__
+            ))
         finally:
+            self._processing = False
             self._set_controls_enabled(True)
+
+    def _extract_boundaries(self, results):
+        boundaries_by_frame = {}
+        for edge_id, edge in results.edges.items():
+            for frame_idx, frame in enumerate(edge.frames):
+                if frame not in boundaries_by_frame:
+                    boundaries_by_frame[frame] = []
+
+                boundary = CellBoundary(
+                    cell_ids=edge.cell_pairs[frame_idx],
+                    coordinates=edge.coordinates[frame_idx],
+                    endpoint1=edge.coordinates[frame_idx][0],
+                    endpoint2=edge.coordinates[frame_idx][-1],
+                    length=edge.lengths[frame_idx]
+                )
+                boundaries_by_frame[frame].append(boundary)
+
+        return boundaries_by_frame
+
+    def connect_signals(self):
+        """Connect parameter control signals"""
+        self.dilation_spin.valueChanged.connect(self.update_parameters)
+        self.overlap_spin.valueChanged.connect(self.update_parameters)
+        self.min_length_spin.valueChanged.connect(self.update_parameters)
+        self.filter_isolated_check.stateChanged.connect(self.update_parameters)
+        self.temporal_window_spin.valueChanged.connect(self.update_parameters)
+        self.min_contact_spin.valueChanged.connect(self.update_parameters)
+        self.edges_detected.connect(self.visualization_manager.update_edge_visualization)
+        self.analysis_completed.connect(self.visualization_manager.update_edge_analysis_visualization)
 
     def save_results(self):
         """Save the current analysis results"""
