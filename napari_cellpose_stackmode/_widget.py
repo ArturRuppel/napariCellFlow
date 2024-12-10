@@ -100,11 +100,15 @@ class CellposeStackmodeWidget(QWidget):
         """Connect signals between components"""
         # Connect preprocessing signals
         self.preprocessing_widget.preprocessing_completed.connect(self._on_preprocessing_completed)
-        self.preprocessing_widget.preprocessing_failed.connect(self._on_preprocessing_failed)
+        self.preprocessing_widget.processing_failed.connect(self._on_preprocessing_failed)
 
         # Connect tracking signals
-        self.tracking_widget.tracking_completed.connect(self._on_tracking_completed)
-        self.tracking_widget.tracking_failed.connect(self._on_tracking_failed)
+        self.tracking_widget.processing_completed.connect(self._on_tracking_completed)
+        self.tracking_widget.processing_failed.connect(self._on_tracking_failed)
+
+        # Connect segmentation signals
+        self.segmentation_widget.processing_completed.connect(self._on_segmentation_completed)
+        self.segmentation_widget.processing_failed.connect(self._on_segmentation_failed)
 
         # Connect visualization widget signals to handle visualization events
         self.visualization_widget.visualization_completed.connect(self._on_visualization_completed)
@@ -119,6 +123,16 @@ class CellposeStackmodeWidget(QWidget):
         """Handle preprocessing failure"""
         logger.error(f"Preprocessing failed: {error_msg}")
         QMessageBox.critical(self, "Error", f"Preprocessing failed: {error_msg}")
+
+    def _on_segmentation_completed(self, result):
+        """Handle completion of segmentation"""
+        logger.info("Segmentation completed successfully")
+        self.data_manager.segmentation_data = result
+
+    def _on_segmentation_failed(self, error_msg):
+        """Handle segmentation failure"""
+        logger.error(f"Segmentation failed: {error_msg}")
+        QMessageBox.critical(self, "Error", f"Segmentation failed: {error_msg}")
 
     def _on_tracking_completed(self, tracked_data):
         """Handle completion of tracking"""
