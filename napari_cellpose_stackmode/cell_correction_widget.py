@@ -14,20 +14,49 @@ from qtpy.QtWidgets import (
     QHBoxLayout, QShortcut
 )
 
-from .debug_logging import logger, log_operation
+from .debug_logging import logger
 
 logger = logging.getLogger(__name__)
 #############################
 # TODO
-# Remove the left click delete cells
+# currently Ctrl+Z only undoes deletion events but no drawing events. In fact, if I first remove a cell, then draw a bunch and then do ctrl+z, then the drawn cells disappear and the removed cell reappears
 #############################
+
+import logging
+from collections import deque
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, Union
+
+import cv2
+import napari
+import numpy as np
+from napari.layers import Labels
+from qtpy.QtCore import Qt, Signal
+from qtpy.QtGui import QKeySequence
+from qtpy.QtWidgets import (
+    QWidget, QVBoxLayout, QPushButton, QLabel, QApplication,
+    QHBoxLayout, QShortcut
+)
+
+from .debug_logging import logger
+
+logger = logging.getLogger(__name__)
+
+
+class ActionType(Enum):
+    DRAW = "draw"
+    DELETE = "delete"
+
 
 @dataclass
 class UndoAction:
-    """Represents a single undoable action"""
+    """Represents a single undoable action with full stack context"""
+    action_type: ActionType
     frame: Optional[int]  # Frame number for 3D stacks, None for 2D
-    previous_state: np.ndarray  # Previous state of the masks
+    previous_state: np.ndarray  # Previous state of the entire stack
     description: str  # Description of the action
+    affected_cell_ids: set  # Set of cell IDs affected by this action
 
 
 class CellCorrectionWidget(QWidget):
@@ -49,13 +78,19 @@ class CellCorrectionWidget(QWidget):
         # Add flags for state management
         self._updating = False
         self._loading_external = False
+        self._undo_in_progress = False
 
-        # Initialize masks layer
+        # Initialize masks layer and full stack
         self.masks_layer = None
+        self._full_stack = None
+
+        # Initialize from available data sources
         if self.vis_manager.tracking_layer is not None:
             self.masks_layer = self.vis_manager.tracking_layer
+            self._initialize_full_stack(self.masks_layer.data)
         elif hasattr(self.data_manager, 'segmentation_data') and self.data_manager.segmentation_data is not None:
             self.set_masks_layer(self.data_manager.segmentation_data)
+            self._initialize_full_stack(self.data_manager.segmentation_data)
 
         # Connect to viewer layer events
         self.viewer.layers.events.inserted.connect(self._handle_layer_added)
@@ -73,15 +108,326 @@ class CellCorrectionWidget(QWidget):
         self.MIN_DRAWING_POINTS = 20
         self.ctrl_pressed = False
         self.toggle_state = False
-        self._updating = False
 
-        # Undo history
+        # Enhanced undo history
         self.undo_stack = deque(maxlen=self.MAX_UNDO_STEPS)
 
         self._setup_ui()
         self._connect_events()
         self._setup_shortcuts()
         QApplication.instance().installEventFilter(self)
+
+
+    def _store_undo_state(self, action_type: ActionType, description: str, affected_cells: set = None):
+        """Store current state for undo with full stack context"""
+        if self._updating or self._undo_in_progress or self._full_stack is None:
+            return
+
+        try:
+            current_frame = int(self.viewer.dims.point[0])
+
+            # Store the entire stack state
+            self.undo_stack.append(UndoAction(
+                action_type=action_type,
+                frame=current_frame,
+                previous_state=self._full_stack.copy(),
+                description=description,
+                affected_cell_ids=affected_cells or set()
+            ))
+
+            self.undo_btn.setEnabled(True)
+            logger.debug(f"Stored undo state: {description} ({action_type})")
+
+        except Exception as e:
+            logger.error(f"Error storing undo state: {e}")
+
+    def _setup_shortcuts(self):
+        """Set up keyboard shortcuts using napari's key bindings"""
+        # Remove any existing shortcuts to avoid duplicates
+        if hasattr(self, 'undo_shortcut'):
+            self.undo_shortcut.setEnabled(False)
+            self.undo_shortcut.deleteLater()
+        if hasattr(self, 'undo_shortcut_alt'):
+            self.undo_shortcut_alt.setEnabled(False)
+            self.undo_shortcut_alt.deleteLater()
+
+        # Add the key binding directly to napari's viewer
+        @self.viewer.bind_key('Control-Z')
+        def undo_callback(viewer):
+            # Check if we're not already processing an undo
+            if not self._undo_in_progress:
+                self.undo_last_action()
+
+        # Connect undo button only once
+        self.undo_btn.clicked.disconnect()  # Disconnect any existing connections
+        self.undo_btn.clicked.connect(self.undo_last_action)
+
+        logger.debug("Shortcuts setup completed with napari key bindings")
+
+    def undo_last_action(self):
+        """Undo the last action with proper state restoration"""
+        if not self.undo_stack or self._undo_in_progress:
+            return
+
+        try:
+            self._undo_in_progress = True
+            self._updating = True
+
+            action = self.undo_stack.pop()
+            logger.debug(f"Undoing action: {action.description}")
+
+            # Restore the entire stack state
+            self._full_stack = action.previous_state.copy()
+
+            # Update visualization
+            self.masks_layer.data = self._full_stack
+            self.vis_manager.update_tracking_visualization(self._full_stack)
+
+            # Update data manager
+            self.data_manager.segmentation_data = self._full_stack
+
+            # Emit correction signal
+            self.correction_made.emit(self._full_stack)
+
+            self.status_label.setText(f"Undid: {action.description}")
+            logger.info(f"Undid action: {action.description} ({action.action_type})")
+
+            # Update undo button state
+            self.undo_btn.setEnabled(len(self.undo_stack) > 0)
+
+            # Force a refresh of the layer
+            if self.masks_layer and self.masks_layer in self.viewer.layers:
+                self.masks_layer.refresh()
+
+        except Exception as e:
+            logger.error(f"Error during undo: {e}")
+        finally:
+            self._undo_in_progress = False
+            self._updating = False
+            self._clear_drawing()
+
+    def cleanup(self):
+        """Clean up resources and disconnect events"""
+        try:
+            # Remove application-wide event filter
+            QApplication.instance().removeEventFilter(self)
+
+            # Remove the key binding
+            self.viewer.keymap.pop('Control-Z', None)
+
+            # Disconnect layer events
+            self.viewer.layers.events.inserted.disconnect(self._handle_layer_added)
+            self.viewer.layers.events.removed.disconnect(self._handle_layer_removal)
+
+            # Remove mouse callbacks
+            if hasattr(self.viewer, 'mouse_drag_callbacks'):
+                if self._on_mouse_drag in self.viewer.mouse_drag_callbacks:
+                    self.viewer.mouse_drag_callbacks.remove(self._on_mouse_drag)
+            if hasattr(self.viewer, 'mouse_move_callbacks'):
+                if self._on_mouse_move in self.viewer.mouse_move_callbacks:
+                    self.viewer.mouse_move_callbacks.remove(self._on_mouse_move)
+            if hasattr(self.viewer, 'mouse_wheel_callbacks'):
+                if self._on_mouse_wheel in self.viewer.mouse_wheel_callbacks:
+                    self.viewer.mouse_wheel_callbacks.remove(self._on_mouse_wheel)
+
+            # Clear drawing state
+            self._clear_drawing()
+
+            # Clear references
+            self.viewer = None
+            self.masks_layer = None
+            self._full_stack = None
+
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+
+    def _finish_drawing(self):
+        """Finish drawing with proper undo state management"""
+        if not self.drawing_points or len(self.drawing_points) < 3 or self._updating:
+            self._clear_drawing()
+            return
+
+        try:
+            current_frame = int(self.viewer.dims.point[0])
+
+            if self._full_stack is None:
+                raise ValueError("No tracking data available")
+
+            # Create new cell mask
+            frame_shape = self._full_stack.shape[1:]
+            new_cell_mask = self._create_cell_mask(frame_shape)
+
+            # Store undo state before modification
+            self._store_undo_state(
+                ActionType.DRAW,
+                f"Draw new cell {self.next_cell_id}",
+                affected_cells={self.next_cell_id}
+            )
+
+            self._updating = True
+
+            # Update current frame data
+            current_frame_data = self._full_stack[current_frame].copy()
+            empty_mask = (current_frame_data == 0)
+            add_mask = np.logical_and(new_cell_mask > 0, empty_mask)
+            current_frame_data[add_mask] = self.next_cell_id
+
+            # Update full stack
+            self._full_stack[current_frame] = current_frame_data
+
+            # Update visualization and data manager
+            self.vis_manager.update_tracking_visualization(self._full_stack)
+            self.data_manager.segmentation_data = self._full_stack
+
+            self.status_label.setText(f"Added new cell {self.next_cell_id}")
+            self.next_cell_id += 1
+
+        except Exception as e:
+            logger.error(f"Error finishing drawing: {e}")
+            raise
+        finally:
+            self._updating = False
+            self.drawing_started = False
+            self.start_point = None
+            self._clear_drawing()
+
+    def _delete_cell_at_position(self, coords):
+        """Delete cell at the given coordinates with proper undo state management"""
+        if self._updating or not self._validate_coords(coords) or self._full_stack is None:
+            return
+
+        current_frame = int(self.viewer.dims.point[0])
+        current_mask = self._full_stack[current_frame]
+        cell_id = current_mask[coords[0], coords[1]]
+
+        if cell_id > 0:
+            try:
+                # Store undo state before modification
+                self._store_undo_state(
+                    ActionType.DELETE,
+                    f"Delete cell {cell_id}",
+                    affected_cells={cell_id}
+                )
+
+                self._updating = True
+
+                # Create a copy of the current frame and update
+                new_frame = current_mask.copy()
+                new_frame[new_frame == cell_id] = 0
+
+                # Update full stack
+                self._full_stack[current_frame] = new_frame
+
+                # Update data manager and visualization
+                self.data_manager.segmentation_data = (new_frame, current_frame)
+                self.vis_manager.update_tracking_visualization((new_frame, current_frame))
+
+                # Force a refresh of the layer
+                if self.masks_layer and self.masks_layer in self.viewer.layers:
+                    self.masks_layer.refresh()
+
+            finally:
+                self._updating = False
+
+
+    def _initialize_full_stack(self, data: np.ndarray):
+        """Initialize the full stack with proper dimensionality"""
+        if data is None:
+            self._full_stack = None
+            return
+
+        # Ensure proper dimensionality
+        if data.ndim == 2:
+            self._full_stack = data[np.newaxis, ...].copy()
+        else:
+            self._full_stack = data.copy()
+
+        # Set initial next cell ID
+        self.next_cell_id = int(self._full_stack.max()) + 1
+        logger.debug(f"Initialized full stack with shape {self._full_stack.shape}")
+
+    def _handle_layer_added(self, event):
+        """Handle when a new layer is added to the viewer"""
+        if self._updating:
+            logger.debug("Skipping layer addition - updating in progress")
+            return
+
+        layer = event.value
+        logger.debug(f"New layer added: {layer.name}, type: {type(layer)}")
+
+        if isinstance(layer, napari.layers.Labels):
+            try:
+                self._updating = True
+                logger.debug("Processing new Labels layer")
+
+                # Initialize with the new layer
+                self.masks_layer = layer
+                if layer.name != 'Drawing Preview':
+                    layer.name = 'Segmentation'
+                    logger.debug("Renamed layer to Segmentation")
+                    # Initialize full stack from the layer data
+                    self._initialize_full_stack(layer.data)
+
+                # Update data manager if needed
+                if not self.data_manager._initialized:
+                    logger.debug("Initializing data manager")
+                    if self._full_stack is not None:
+                        self.data_manager.initialize_stack(self._full_stack.shape[0])
+                        self.data_manager.segmentation_data = self._full_stack
+
+                # Update visualization manager
+                if layer.name != 'Drawing Preview':
+                    logger.debug("Setting tracking layer in visualization manager")
+                    self.vis_manager.tracking_layer = layer
+
+            except Exception as e:
+                logger.error(f"Failed to initialize with external layer: {e}", exc_info=True)
+            finally:
+                self._updating = False
+                logger.debug("Layer initialization complete")
+
+    def set_masks_layer(self, masks: np.ndarray):
+        """Set or update the masks layer."""
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+            logger.debug(f"Setting masks layer with shape {masks.shape}")
+
+            # Initialize full stack first
+            self._initialize_full_stack(masks)
+
+            # Update through visualization manager first
+            if self.vis_manager is not None:
+                self.vis_manager.update_tracking_visualization(self._full_stack)
+                self.masks_layer = self.vis_manager.tracking_layer
+            else:
+                # Create new layer if needed
+                if self.masks_layer is None or self.masks_layer not in self.viewer.layers:
+                    self.masks_layer = self.viewer.add_labels(
+                        self._full_stack,
+                        name='Segmentation',
+                        opacity=0.5
+                    )
+                else:
+                    self.masks_layer.data = self._full_stack
+
+            # Update visualization manager reference
+            if self.vis_manager is not None:
+                self.vis_manager.tracking_layer = self.masks_layer
+
+        except Exception as e:
+            logger.error(f"Error setting masks layer: {str(e)}")
+            raise
+        finally:
+            self._updating = False
+
+    def _update_full_stack(self, data: np.ndarray):
+        """Update the internal full stack reference"""
+        if data.ndim == 2:
+            data = data[np.newaxis, ...]
+        self._full_stack = data.copy()
 
     def _setup_ui(self):
         layout = QVBoxLayout()
@@ -109,13 +455,10 @@ class CellCorrectionWidget(QWidget):
         # Updated instructions
         instructions = QLabel(
             "Drawing Mode:\n"
+            "- Hold Ctrl + Left click to delete cells\n"
             "- Hold Ctrl + Right click and drag to draw cell boundary\n"
             "- Return to start point (marked with circle) to complete the cell\n"
-            "- Left click to delete cells\n"
-            "- Ctrl+Z to undo last action\n\n"
-            "Selection Mode:\n"
-            "- Right-click: Select cell\n"
-            "- Delete: Remove selected cell"
+            "- Ctrl+Z to undo last action"
         )
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
@@ -321,52 +664,6 @@ class CellCorrectionWidget(QWidget):
             logger.error(f"Error updating drawing preview: {e}")
             self._clear_drawing()
 
-    def _finish_drawing(self):
-        if not self.drawing_points or len(self.drawing_points) < 3:
-            logger.debug("CellCorrection: Not enough points to complete drawing")
-            self._clear_drawing()
-            return
-
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-            current_frame = int(self.viewer.dims.point[0])
-
-            if not self.vis_manager.tracking_layer:
-                raise ValueError("No tracking layer available")
-
-            # Get a deep copy of the full stack
-            full_stack = self.vis_manager.tracking_layer.data.copy()
-            self.next_cell_id = int(full_stack.max()) + 1
-
-            # Create new cell mask
-            frame_shape = full_stack.shape[1:]
-            new_cell_mask = self._create_cell_mask(frame_shape)
-
-            # Update current frame data
-            current_frame_data = full_stack[current_frame].copy()
-            empty_mask = (current_frame_data == 0)
-            add_mask = np.logical_and(new_cell_mask > 0, empty_mask)
-            current_frame_data[add_mask] = self.next_cell_id
-            full_stack[current_frame] = current_frame_data
-
-            # Update visualization and data
-            self.vis_manager.update_tracking_visualization(full_stack)
-            self.data_manager.segmentation_data = full_stack
-            self.status_label.setText(f"Added new cell {self.next_cell_id}")
-            self.next_cell_id += 1
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error finishing drawing: {e}")
-            raise
-        finally:
-            self._updating = False
-            self.drawing_started = False
-            self.start_point = None
-            self._clear_drawing()
-
     def _create_cell_mask(self, frame_shape):
         """Create a mask for the new cell"""
         new_cell_mask = np.zeros(frame_shape, dtype=np.uint8)
@@ -374,54 +671,6 @@ class CellCorrectionWidget(QWidget):
         points = np.clip(points, 0, np.array(frame_shape) - 1).astype(np.int32)
         cv2.fillPoly(new_cell_mask, [points[:, ::-1]], 1)
         return new_cell_mask
-
-    def _handle_layer_added(self, event):
-        """Handle when a new layer is added to the viewer"""
-        if self._updating:
-            logger.debug("Skipping layer addition - updating in progress")
-            return
-
-        layer = event.value
-        logger.debug(f"New layer added: {layer.name}, type: {type(layer)}")
-
-        if isinstance(layer, napari.layers.Labels):
-            try:
-                self._updating = True
-                logger.debug("Processing new Labels layer")
-
-                # Initialize with the new layer
-                self.masks_layer = layer
-                if layer.name != 'Drawing Preview':
-                    layer.name = 'Segmentation'
-                    logger.debug("Renamed layer to Segmentation")
-
-                # Store full data
-                data = layer.data
-                if data.ndim == 2:
-                    data = data[np.newaxis, ...]
-                logger.debug(f"Layer data shape: {data.shape}")
-                logger.debug(f"Unique values in data: {np.unique(data)}")
-
-                # Update data manager
-                if not self.data_manager._initialized:
-                    logger.debug("Initializing data manager")
-                    self.data_manager.initialize_stack(data.shape[0])
-                self.data_manager.segmentation_data = data
-
-                # Update visualization manager
-                if layer.name != 'Drawing Preview':
-                    logger.debug("Setting tracking layer in visualization manager")
-                    self.vis_manager.tracking_layer = layer
-
-                # Update next cell ID
-                self.next_cell_id = int(data.max()) + 1
-                logger.debug(f"Set next cell ID to: {self.next_cell_id}")
-
-            except Exception as e:
-                logger.error(f"Failed to initialize with external layer: {e}", exc_info=True)
-            finally:
-                self._updating = False
-                logger.debug("Layer initialization complete")
 
     def _on_mouse_wheel(self, viewer, event):
         """Handle mouse wheel events with proper state synchronization."""
@@ -506,37 +755,6 @@ class CellCorrectionWidget(QWidget):
         finally:
             self._updating = False
 
-    def _store_undo_state(self, description: str):
-        """Store current state for undo"""
-        if self._updating:
-            return
-
-        try:
-            if self.masks_layer is None:
-                return
-
-            if hasattr(self, '_full_masks') and self._full_masks is not None:
-                current_frame = int(self.viewer.dims.point[0])
-                # Store only the current frame's state for 3D data
-                self.undo_stack.append(UndoAction(
-                    frame=current_frame,
-                    previous_state=self._full_masks[current_frame].copy(),
-                    description=description
-                ))
-            else:
-                # Store the entire 2D mask
-                self.undo_stack.append(UndoAction(
-                    frame=None,
-                    previous_state=self.masks_layer.data.copy(),
-                    description=description
-                ))
-
-            self.undo_btn.setEnabled(True)
-            logger.debug(f"Stored undo state: {description}")
-
-        except Exception as e:
-            logger.error(f"Error storing undo state: {e}")
-
     def _connect_events(self):
         """Connect all event handlers"""
         # Remove any existing callbacks first
@@ -554,9 +772,6 @@ class CellCorrectionWidget(QWidget):
 
         print("Mouse callbacks connected")  # Debug
 
-        # Bind keyboard events
-        self.viewer.bind_key('Delete', self._on_delete_pressed)
-
         # Add toggle button connection
         self.toggle_draw_btn.toggled.connect(self._handle_toggle_button)
 
@@ -567,118 +782,6 @@ class CellCorrectionWidget(QWidget):
         """Handle toggle button state changes"""
         self.toggle_state = checked
         self._update_drawing_state()
-
-    def undo_last_action(self):
-        """Undo the last action"""
-        if not self.undo_stack:
-            return
-
-        try:
-            self._updating = True
-            action = self.undo_stack.pop()
-
-            if hasattr(self, '_full_masks') and self._full_masks is not None:
-                if action.frame is not None:
-                    self._full_masks[action.frame] = action.previous_state
-                    self.masks_layer.data = action.previous_state
-                    self.correction_made.emit(self._full_masks)
-            else:
-                self.masks_layer.data = action.previous_state
-                self.correction_made.emit(action.previous_state)
-
-            self.status_label.setText(f"Undid: {action.description}")
-            logger.info(f"Undid action: {action.description}")
-
-            # Update undo button state
-            self.undo_btn.setEnabled(len(self.undo_stack) > 0)
-
-        except Exception as e:
-            logger.error(f"Error during undo: {e}")
-            raise
-        finally:
-            self._updating = False
-            self._clear_drawing()
-
-    def _delete_cell_at_position(self, coords):
-        """Delete cell at the given coordinates."""
-        if self._updating or not self._validate_coords(coords):
-            logger.debug("Deletion skipped - updating flag or invalid coords")
-            return
-
-        current_mask = self._get_current_frame_mask()
-        if current_mask is None:
-            logger.debug("Deletion skipped - no current mask")
-            return
-
-        cell_id = current_mask[coords[0], coords[1]]
-        if cell_id > 0:
-            try:
-                self._store_undo_state(f"Delete cell {cell_id}")
-                self._updating = True
-
-                # Create a copy of just the current frame
-                new_frame = current_mask.copy()
-                new_frame[new_frame == cell_id] = 0
-
-                # Get current frame index
-                current_slice = int(self.viewer.dims.point[0])
-
-                # Update only the current frame in data manager
-                self.data_manager.segmentation_data = (new_frame, current_slice)
-
-                # Update visualization for single frame
-                self.vis_manager.update_tracking_visualization(
-                    (new_frame, current_slice)
-                )
-
-            finally:
-                self._updating = False
-
-    def _setup_shortcuts(self):
-        """Set up keyboard shortcuts"""
-        self.undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
-        self.undo_shortcut.activated.connect(self.undo_last_action)
-
-    def set_masks_layer(self, masks: np.ndarray):
-        """Set or update the masks layer."""
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-            logger.debug(f"Setting masks layer with shape {masks.shape}")
-
-            # Ensure proper dimensionality
-            if masks.ndim == 2:
-                masks = masks[np.newaxis, ...]
-
-            # Update through visualization manager first
-            if self.vis_manager is not None:
-                self.vis_manager.update_tracking_visualization(masks)
-                self.masks_layer = self.vis_manager.tracking_layer
-            else:
-                # Create new layer if needed
-                if self.masks_layer is None or self.masks_layer not in self.viewer.layers:
-                    self.masks_layer = self.viewer.add_labels(
-                        masks,
-                        name='Segmentation',
-                        opacity=0.5
-                    )
-                else:
-                    self.masks_layer.data = masks
-
-            # Update visualization manager reference
-            if self.vis_manager is not None:
-                self.vis_manager.tracking_layer = self.masks_layer
-
-            # Set next cell ID
-            self.next_cell_id = int(masks.max()) + 1
-
-        except Exception as e:
-            logger.error(f"Error setting masks layer: {str(e)}")
-            raise
-        finally:
-            self._updating = False
 
     def _get_current_frame_mask(self):
         """Get mask for the current frame."""
@@ -692,104 +795,6 @@ class CellCorrectionWidget(QWidget):
         else:
             # For 2D data, return as is
             return self.masks_layer.data
-
-    def _handle_selection(self, coords):
-        """Handle cell selection."""
-        if not self._validate_coords(coords):
-            return
-
-        current_mask = self._get_current_frame_mask()
-        if current_mask is None:
-            return
-
-        cell_id = current_mask[coords[0], coords[1]]
-        if cell_id > 0:
-            self.selected_cell = cell_id
-            self.status_label.setText(f"Selected cell: {cell_id}")
-            self._highlight_selected_cell()
-
-    def _highlight_selected_cell(self):
-        """Highlight the selected cell."""
-        if self.selected_cell is None:
-            return
-
-        self._clear_drawing()
-
-        # Create highlight mask
-        if len(self.masks_layer.data.shape) == 3:
-            current_frame = int(self.viewer.dims.point[0])
-            highlight = np.zeros_like(self.masks_layer.data)
-            highlight[current_frame][self.masks_layer.data[current_frame] == self.selected_cell] = 1
-        else:
-            highlight = np.zeros_like(self.masks_layer.data)
-            highlight[self.masks_layer.data == self.selected_cell] = 1
-
-        self.drawing_layer = self.viewer.add_labels(
-            highlight,
-            name='Selected Cell',
-            opacity=0.6
-        )
-
-    def _on_delete_pressed(self, viewer):
-        """Handle delete key press to remove selected cell."""
-        if self.selected_cell is None or self.masks_layer is None:
-            return
-
-        try:
-            if hasattr(self, '_full_masks') and self._full_masks is not None:
-                current_slice = int(self.viewer.dims.point[0])
-                new_mask = self._full_masks[current_slice].copy()
-                new_mask[new_mask == self.selected_cell] = 0
-
-                # Update both the full stack and current view
-                self._full_masks[current_slice] = new_mask
-                self.masks_layer.data = new_mask
-                self.correction_made.emit(self._full_masks)
-            else:
-                new_mask = self.masks_layer.data.copy()
-                new_mask[new_mask == self.selected_cell] = 0
-                self.masks_layer.data = new_mask
-                self.correction_made.emit(new_mask)
-
-            self._clear_drawing()
-            self.selected_cell = None
-            self.status_label.setText(f"Deleted cell {self.selected_cell}")
-
-        except Exception as e:
-            logger.error(f"Error deleting cell: {e}")
-            raise
-
-    def cleanup(self):
-        """Clean up resources and disconnect events"""
-        try:
-            # Remove application-wide event filter
-            QApplication.instance().removeEventFilter(self)
-
-            # Disconnect layer events
-            self.viewer.layers.events.inserted.disconnect(self._handle_layer_added)
-            self.viewer.layers.events.removed.disconnect(self._handle_layer_removal)
-
-            # Remove mouse callbacks
-            if hasattr(self.viewer, 'mouse_drag_callbacks'):
-                if self._on_mouse_drag in self.viewer.mouse_drag_callbacks:
-                    self.viewer.mouse_drag_callbacks.remove(self._on_mouse_drag)
-            if hasattr(self.viewer, 'mouse_move_callbacks'):
-                if self._on_mouse_move in self.viewer.mouse_move_callbacks:
-                    self.viewer.mouse_move_callbacks.remove(self._on_mouse_move)
-            if hasattr(self.viewer, 'mouse_wheel_callbacks'):
-                if self._on_mouse_wheel in self.viewer.mouse_wheel_callbacks:
-                    self.viewer.mouse_wheel_callbacks.remove(self._on_mouse_wheel)
-
-            # Clear drawing state
-            self._clear_drawing()
-
-            # Clear references
-            self.viewer = None
-            self.masks_layer = None
-            self._full_masks = None
-
-        except Exception as e:
-            logger.error(f"Error during cleanup: {e}")
 
     def _on_mouse_move(self, viewer, event):
         """Handle mouse movement for drawing preview."""
