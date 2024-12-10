@@ -423,12 +423,6 @@ class CellCorrectionWidget(QWidget):
         finally:
             self._updating = False
 
-    def _update_full_stack(self, data: np.ndarray):
-        """Update the internal full stack reference"""
-        if data.ndim == 2:
-            data = data[np.newaxis, ...]
-        self._full_stack = data.copy()
-
     def _setup_ui(self):
         layout = QVBoxLayout()
         self.setLayout(layout)
@@ -583,19 +577,6 @@ class CellCorrectionWidget(QWidget):
         except Exception as e:
             logger.error(f"CellCorrection: Error in mouse drag: {e}", exc_info=True)
 
-    def _initialize_or_recover_layer(self):
-        """Initialize or recover the masks layer."""
-        try:
-            if self.masks_layer is None or self.masks_layer not in self.viewer.layers:
-                logger.debug("CellCorrection: Attempting to recover masks layer")
-                if self.vis_manager.tracking_layer is not None:
-                    self.masks_layer = self.vis_manager.tracking_layer
-                    logger.debug("CellCorrection: Recovered masks layer from visualization manager")
-                else:
-                    logger.debug("CellCorrection: No tracking layer available")
-        except Exception as e:
-            logger.error(f"CellCorrection: Error initializing/recovering layer: {e}")
-
     def _update_drawing_preview(self):
         """Update the preview of the cell being drawn."""
         if not self.drawing_points or len(self.drawing_points) < 2:
@@ -724,37 +705,6 @@ class CellCorrectionWidget(QWidget):
             self.masks_layer = None
             self._full_masks = None
 
-    def _init_with_external_data(self, data: np.ndarray):
-        """Initialize widget with externally loaded data"""
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-
-            # Ensure proper dimensionality
-            if data.ndim == 2:
-                data = data[np.newaxis, ...]
-
-            # Initialize data manager
-            if not self.data_manager._initialized:
-                self.data_manager.initialize_stack(data.shape[0])
-            self.data_manager.segmentation_data = data
-
-            # Update visualization
-            self.vis_manager.update_tracking_visualization(data)
-
-            # Update internal references
-            self.masks_layer = self.vis_manager.tracking_layer
-            self._full_masks = data.copy()
-            self.next_cell_id = int(data.max()) + 1
-
-        except Exception as e:
-            logger.error(f"Failed to initialize with external data: {e}")
-            raise
-        finally:
-            self._updating = False
-
     def _connect_events(self):
         """Connect all event handlers"""
         # Remove any existing callbacks first
@@ -783,19 +733,6 @@ class CellCorrectionWidget(QWidget):
         self.toggle_state = checked
         self._update_drawing_state()
 
-    def _get_current_frame_mask(self):
-        """Get mask for the current frame."""
-        if self.masks_layer is None:
-            return None
-
-        if len(self.masks_layer.data.shape) == 3:
-            # For 3D data, get current frame
-            current_frame = int(self.viewer.dims.point[0])
-            return self.masks_layer.data[current_frame]
-        else:
-            # For 2D data, return as is
-            return self.masks_layer.data
-
     def _on_mouse_move(self, viewer, event):
         """Handle mouse movement for drawing preview."""
         if not self.is_drawing or not self.drawing_started:
@@ -818,25 +755,3 @@ class CellCorrectionWidget(QWidget):
 
                 self._update_drawing_preview()
 
-    def _handle_layer_removed(self, event):
-        """Handle layer removal events."""
-        try:
-            layer = event.value
-            logger.debug(f"CellCorrection: Layer removed: {layer.name}")
-
-            if layer == self.masks_layer:
-                logger.debug("CellCorrection: Masks layer was removed")
-                # Only clear reference if it's actually gone from viewer
-                if layer not in self.viewer.layers:
-                    self.masks_layer = None
-                    # Try to recover from visualization manager
-                    if self.vis_manager.tracking_layer is not None:
-                        logger.debug("CellCorrection: Recovering masks layer from visualization manager")
-                        self.masks_layer = self.vis_manager.tracking_layer
-
-            logger.debug(f"CellCorrection: After removal - masks_layer exists: {self.masks_layer is not None}")
-            if self.masks_layer is not None:
-                logger.debug(f"CellCorrection: After removal - masks_layer in viewer: {self.masks_layer in self.viewer.layers}")
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error handling layer removal: {e}")
