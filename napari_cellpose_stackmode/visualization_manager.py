@@ -10,12 +10,13 @@ from napari.layers import Layer, Labels, Points
 from napari.utils.transforms import Affine
 
 from napari_cellpose_stackmode.structure import EdgeAnalysisResults
+from .error_handling import ErrorSeverity, ErrorHandlingMixin, ApplicationError
 from .structure import CellBoundary, IntercalationEvent
 
 logger = logging.getLogger(__name__)
 
 
-class VisualizationManager:
+class VisualizationManager(ErrorHandlingMixin):
     """Manages visualization of cell tracking results in napari."""
 
     def __init__(self, viewer: "napari.Viewer", data_manager: "DataManager"):
@@ -24,17 +25,28 @@ class VisualizationManager:
         self.tracking_layer = None
         self.overlay_layer = None
         self._updating = False
-        self._current_dims = None
         self._layer_lock = Lock()
-        self._edge_layer: Optional[Points] = None
-        self._intercalation_layer: Optional[Points] = None
-        self._analysis_layer: Optional[Points] = None
-        self._color_cycle = np.random.RandomState(42)  # For consistent random colors
-        # Connect to layer removal event
-        self.viewer.layers.events.removed.connect(self._handle_layer_removal)
+
+        # Initialize layer references
+        self._edge_layer = None
+        self._intercalation_layer = None
+        self._analysis_layer = None
+
+        self._color_cycle = np.random.RandomState(42)
+
+        # Connect to layer removal event with error handling
+        try:
+            self.viewer.layers.events.removed.connect(self._handle_layer_removal)
+        except Exception as e:
+            self.handle_error(self.create_error(
+                message="Failed to connect layer events",
+                details=str(e),
+                severity=ErrorSeverity.WARNING,
+                recovery_hint="Layer removal events may not be handled properly"
+            ))
 
     def update_tracking_visualization(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> None:
-        """Update tracking visualization with layer preservation."""
+        """Update tracking visualization with layer preservation and error handling."""
         if self._updating:
             logger.debug("VisualizationManager: Update cancelled - already updating")
             return
@@ -42,10 +54,8 @@ class VisualizationManager:
         try:
             self._updating = True
             with self._layer_lock:
-                # Handle single frame or full stack update
                 update_data = self._prepare_update_data(data)
 
-                # Update or create layer
                 with self.viewer.events.blocker_all():
                     if self.tracking_layer is not None and self.tracking_layer in self.viewer.layers:
                         self.tracking_layer.data = update_data
@@ -58,30 +68,138 @@ class VisualizationManager:
                             visible=True
                         )
 
+        except ValueError as e:
+            self.handle_error(self.create_error(
+                message="Invalid data format",
+                details=str(e),
+                severity=ErrorSeverity.ERROR,
+                recovery_hint="Check data dimensions and format"
+            ))
         except Exception as e:
-            logger.error(f"VisualizationManager: Error updating visualization: {e}")
-            raise
+            self.handle_error(self.create_error(
+                message="Failed to update visualization",
+                details=str(e),
+                severity=ErrorSeverity.ERROR,
+                original_error=e
+            ))
         finally:
             self._updating = False
 
     def _prepare_update_data(self, data: Union[np.ndarray, Tuple[np.ndarray, int]]) -> np.ndarray:
-        """Prepare data for visualization update."""
-        if isinstance(data, tuple):
-            frame_data, frame_index = data
-            num_frames = self.data_manager._num_frames
+        """Prepare data for visualization update with validation."""
+        try:
+            if isinstance(data, tuple):
+                frame_data, frame_index = data
+                if not isinstance(frame_data, np.ndarray):
+                    raise ValueError("Frame data must be a numpy array")
 
-            if self.tracking_layer is None:
-                # Create new full-sized stack
-                update_data = np.zeros((num_frames, *frame_data.shape), dtype=frame_data.dtype)
-                update_data[frame_index] = frame_data
+                num_frames = self.data_manager._num_frames
+                if frame_index >= num_frames:
+                    raise ValueError(f"Frame index {frame_index} exceeds stack size {num_frames}")
+
+                if self.tracking_layer is None:
+                    update_data = np.zeros((num_frames, *frame_data.shape), dtype=frame_data.dtype)
+                    update_data[frame_index] = frame_data
+                else:
+                    update_data = self._update_existing_stack(frame_data, frame_index, num_frames)
             else:
-                # Update existing stack
-                update_data = self._update_existing_stack(frame_data, frame_index, num_frames)
-        else:
-            # Handle full stack update
-            update_data = self._prepare_full_stack(data)
+                if not isinstance(data, np.ndarray):
+                    raise ValueError("Data must be a numpy array")
+                update_data = self._prepare_full_stack(data)
 
-        return update_data
+            return update_data
+
+        except ValueError as e:
+            raise ApplicationError(
+                message="Invalid data format",
+                details=str(e),
+                severity=ErrorSeverity.ERROR,
+                recovery_hint="Check input data format and dimensions"
+            )
+        except Exception as e:
+            raise ApplicationError(
+                message="Failed to prepare visualization data",
+                details=str(e),
+                severity=ErrorSeverity.ERROR,
+                original_error=e
+            )
+
+    def clear_visualization(self):
+        """Remove all visualization layers with error handling."""
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+            self._remove_layers_safely()
+            self._current_dims = None
+            logger.debug("Cleared all visualization layers")
+
+        except Exception as e:
+            self.handle_error(self.create_error(
+                message="Failed to clear visualization",
+                details=str(e),
+                severity=ErrorSeverity.WARNING,
+                recovery_hint="Some layers may need to be removed manually"
+            ))
+        finally:
+            self._updating = False
+
+    def _remove_layers_safely(self):
+        """Safely remove layers with individual error handling."""
+        for layer_name in ['tracking_layer', 'overlay_layer']:
+            layer = getattr(self, layer_name, None)
+            if layer is not None:
+                try:
+                    if layer in self.viewer.layers:
+                        self.viewer.layers.remove(layer)
+                    setattr(self, layer_name, None)
+                except Exception as e:
+                    self.handle_error(self.create_error(
+                        message=f"Failed to remove {layer_name}",
+                        details=str(e),
+                        severity=ErrorSeverity.WARNING
+                    ))
+
+    def validate_stack_consistency(self) -> bool:
+        """Validate visualization state consistency with detailed error reporting."""
+        try:
+            if self.tracking_layer is None:
+                return True
+
+            if self._current_dims is not None:
+                if self.tracking_layer.data.shape != self._current_dims:
+                    self.handle_error(self.create_error(
+                        message="Visualization shape mismatch",
+                        details=f"Expected {self._current_dims}, got {self.tracking_layer.data.shape}",
+                        severity=ErrorSeverity.WARNING,
+                        recovery_hint="Data may not be displayed correctly"
+                    ))
+                    return False
+
+            if self.data_manager is not None and self.data_manager.segmentation_data is not None:
+                stack_shape = self.data_manager.segmentation_data.shape
+                visualization_shape = self.tracking_layer.data.shape
+
+                if stack_shape != visualization_shape:
+                    self.handle_error(self.create_error(
+                        message="Stack shape mismatch",
+                        details=f"DataManager={stack_shape}, Visualization={visualization_shape}",
+                        severity=ErrorSeverity.WARNING,
+                        recovery_hint="Visualization may be out of sync with data"
+                    ))
+                    return False
+
+            return True
+
+        except Exception as e:
+            self.handle_error(self.create_error(
+                message="Failed to validate stack consistency",
+                details=str(e),
+                severity=ErrorSeverity.ERROR,
+                original_error=e
+            ))
+            return False
 
     def _update_existing_stack(self, frame_data: np.ndarray, frame_index: int, num_frames: int) -> np.ndarray:
         """Update existing stack with new frame data."""
@@ -235,54 +353,6 @@ class VisualizationManager:
 
             current_data[frame_index] = frame_data
             self.tracking_layer.data = current_data
-
-    def validate_stack_consistency(self):
-        """Validate that visualization state is consistent"""
-        if self.tracking_layer is None:
-            return True
-
-        if self._current_dims is not None:
-            if self.tracking_layer.data.shape != self._current_dims:
-                logger.error(f"Visualization shape mismatch: expected {self._current_dims}, got {self.tracking_layer.data.shape}")
-                return False
-
-        # Check against data manager if available
-        if self.data_manager is not None and self.data_manager.segmentation_data is not None:
-            stack_shape = self.data_manager.segmentation_data.shape
-            visualization_shape = self.tracking_layer.data.shape
-
-            if stack_shape != visualization_shape:
-                logger.error(f"Stack shape mismatch: DataManager={stack_shape}, Visualization={visualization_shape}")
-                return False
-
-        return True
-
-    def clear_visualization(self):
-        """Remove all visualization layers."""
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-
-            if self.tracking_layer is not None:
-                if self.tracking_layer in self.viewer.layers:
-                    self.viewer.layers.remove(self.tracking_layer)
-                self.tracking_layer = None
-
-            if self.overlay_layer is not None:
-                if self.overlay_layer in self.viewer.layers:
-                    self.viewer.layers.remove(self.overlay_layer)
-                self.overlay_layer = None
-
-            self._current_dims = None
-            logger.debug("Cleared all visualization layers")
-
-        except Exception as e:
-            logger.error(f"Error clearing visualization: {e}")
-            raise
-        finally:
-            self._updating = False
 
     def set_data_manager(self, data_manager: "DataManager"):
         """Allow setting the data manager after initialization."""
