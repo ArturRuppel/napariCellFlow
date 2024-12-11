@@ -9,6 +9,8 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Signal, Qt
 import napari
 
+from napari_cellpose_stackmode.error_handling import ErrorHandlingMixin, ApplicationError, ErrorSeverity
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,9 +24,7 @@ class ProcessingError(Exception):
         super().__init__(message)
 
 
-class BaseAnalysisWidget(QWidget):
-    """Base widget for tissue analysis components with integrated error handling."""
-
+class BaseAnalysisWidget(QWidget, ErrorHandlingMixin):
     # Common signals
     processing_completed = Signal(object)  # Generic completion signal
     processing_failed = Signal(str)  # Error message signal
@@ -50,6 +50,24 @@ class BaseAnalysisWidget(QWidget):
 
         # Set up UI
         self._setup_base_ui(widget_title)
+    def _handle_error(self, error):
+        # Convert ProcessingError to ApplicationError if needed
+        if isinstance(error, ProcessingError):
+            app_error = self.create_error(
+                message=error.message,
+                details=error.details,
+                component=error.component or self.__class__.__name__
+            )
+        elif isinstance(error, ApplicationError):
+            app_error = error
+        else:
+            app_error = self.create_error(
+                message=str(error),
+                severity=ErrorSeverity.ERROR
+            )
+
+        self.handle_error(app_error)
+
 
     def _setup_base_ui(self, title: str):
         """Initialize the base user interface"""
@@ -137,27 +155,6 @@ class BaseAnalysisWidget(QWidget):
             parent_checkbox.stateChanged.connect(
                 lambda state: control.setEnabled(bool(state))
             )
-
-    def _handle_error(self, error: ProcessingError):
-        """Handle processing errors"""
-        self._update_status(f"Error: {error.message}")
-        self.progress_bar.setValue(0)
-
-        QMessageBox.warning(
-            self,
-            "Processing Error",
-            f"{error.message}\n\nDetails: {error.details}"
-        )
-
-        self._set_controls_enabled(True)
-        self._processing = False
-        self._batch_processing = False
-        self.processing_failed.emit(error.message)
-
-        logger.error(
-            f"{error.component or self.__class__.__name__}: {error.message}",
-            exc_info=True
-        )
 
     def _validate_input_data(self, data: np.ndarray) -> bool:
         """Validate input data format and content"""
