@@ -23,16 +23,8 @@ class VisualizationManager(ErrorHandlingMixin):
         self.viewer = viewer
         self.data_manager = data_manager
         self.tracking_layer = None
-        self.overlay_layer = None
         self._updating = False
         self._layer_lock = Lock()
-
-        # Initialize layer references
-        self._edge_layer = None
-        self._intercalation_layer = None
-        self._analysis_layer = None
-
-        self._color_cycle = np.random.RandomState(42)
 
         # Connect to layer removal event with error handling
         try:
