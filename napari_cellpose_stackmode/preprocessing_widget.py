@@ -5,13 +5,13 @@ import numpy as np
 from napari.utils.events import Event
 from qtpy.QtCore import Signal, Qt
 from qtpy.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QSlider,
+    QWidget, QVBoxLayout, QHBoxLayout, QSlider, QGroupBox, QSizePolicy, QProgressBar, QLabel,
     QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
     QFormLayout
 )
 from qtrangeslider import QRangeSlider
 
-from .base_widget import BaseAnalysisWidget, ProcessingError
+from .base_widget_new import BaseAnalysisWidget, ProcessingError
 from .data_manager import DataManager
 from .preprocessing import PreprocessingParameters, ImagePreprocessor
 from .visualization_manager import VisualizationManager
@@ -33,8 +33,7 @@ class PreprocessingWidget(BaseAnalysisWidget):
         super().__init__(
             viewer=viewer,
             data_manager=data_manager,
-            visualization_manager=visualization_manager,
-            widget_title="Image Preprocessing"
+            visualization_manager=visualization_manager
         )
 
         self.preprocessor = ImagePreprocessor()
@@ -48,65 +47,143 @@ class PreprocessingWidget(BaseAnalysisWidget):
         self.current_min_intensity = 0
         self.current_max_intensity = 255
 
+        # Initialize all controls
+        self._initialize_controls()
+
+        # Setup UI and connect signals
         self._setup_ui()
         self._connect_signals()
 
         # Add layer removal event handler
         self.viewer.layers.events.removed.connect(self._handle_layer_removal)
 
-    def _setup_ui(self):
-        """Initialize the user interface"""
-        form_layout = QFormLayout()
-
-        # Intensity Range
-        intensity_layout = QVBoxLayout()
-
+    def _initialize_controls(self):
+        """Initialize all UI controls"""
+        # Intensity controls
         self.intensity_slider = QRangeSlider(Qt.Horizontal)
-        self.intensity_slider.setRange(0, 255)
-        self.intensity_slider.setValue((0, 255))
-        intensity_layout.addWidget(self.intensity_slider)
-
-        spin_layout = QHBoxLayout()
         self.min_spin = QSpinBox()
         self.max_spin = QSpinBox()
+
+        # Median filter controls
+        self.median_check = QCheckBox()
+        self.median_size_spin = QSpinBox()
+        self.median_slider = QSlider(Qt.Horizontal)
+
+        # Gaussian filter controls
+        self.gaussian_check = QCheckBox()
+        self.gaussian_sigma_spin = QDoubleSpinBox()
+        self.gaussian_slider = QSlider(Qt.Horizontal)
+
+        # CLAHE controls
+        self.clahe_check = QCheckBox()
+        self.clahe_clip_spin = QDoubleSpinBox()
+        self.clahe_clip_slider = QSlider(Qt.Horizontal)
+        self.clahe_grid_spin = QSpinBox()
+        self.clahe_grid_slider = QSlider(Qt.Horizontal)
+
+        # Preview control
+        self.preview_check = QCheckBox("Show Preview")
+
+        # Action buttons
+        self.preprocess_btn = QPushButton("Run Preprocessing")
+        self.reset_btn = QPushButton("Reset Parameters")
+
+    def _create_intensity_group(self) -> QGroupBox:
+        """Create intensity range controls group"""
+        group = QGroupBox("Intensity Range")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+
+        # Configure intensity slider
+        self.intensity_slider.setRange(0, 255)
+        self.intensity_slider.setValue((0, 255))
+        layout.addWidget(self.intensity_slider)
+
+        # Configure spinboxes
+        spin_layout = QHBoxLayout()
         for spin in (self.min_spin, self.max_spin):
             spin.setRange(0, 255)
             spin.setFixedWidth(80)
             spin_layout.addWidget(spin)
         spin_layout.addStretch()
-        intensity_layout.addLayout(spin_layout)
+        layout.addLayout(spin_layout)
 
-        form_layout.addRow("Intensity Range:", intensity_layout)
+        group.setLayout(layout)
+        return group
 
-        # Create parameter controls
-        self._create_filter_controls(form_layout)
+    def _create_filter_group(self) -> QGroupBox:
+        """Create filter parameters group"""
+        group = QGroupBox("Filter Parameters")
+        layout = QFormLayout()
+        layout.setSpacing(4)
 
-        # Preview checkbox
-        preview_layout = QHBoxLayout()
-        self.preview_check = QCheckBox("Show Preview")
-        preview_layout.addWidget(self.preview_check)
-        preview_layout.addStretch()
+        # Create filter controls using the existing method
+        self._create_filter_controls(layout)
 
-        # Action buttons
-        button_layout = QHBoxLayout()
-        self.preprocess_btn = QPushButton("Run Preprocessing")
-        self.reset_btn = QPushButton("Reset Parameters")
-        button_layout.addWidget(self.preprocess_btn)
-        button_layout.addWidget(self.reset_btn)
+        group_widget = QWidget()
+        group_widget.setLayout(layout)
 
-        # Add all layouts to main layout
-        params_widget = QWidget()
-        params_widget.setLayout(form_layout)
-        self.main_layout.insertWidget(1, params_widget)
-        self.main_layout.insertLayout(2, preview_layout)
-        self.main_layout.insertLayout(3, button_layout)  # Add buttons before the stretch
+        group_layout = QVBoxLayout()
+        group_layout.addWidget(group_widget)
+        group.setLayout(group_layout)
 
-        # Register controls with base widget
+        return group
+
+    def _create_preview_group(self) -> QGroupBox:
+        """Create preview controls group"""
+        group = QGroupBox("Preview")
+        layout = QHBoxLayout()
+        layout.addWidget(self.preview_check)
+        layout.addStretch()
+        group.setLayout(layout)
+        return group
+
+    def _create_action_group(self) -> QGroupBox:
+        """Create action buttons group"""
+        group = QGroupBox("Actions")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+        layout.addWidget(self.preprocess_btn)
+        layout.addWidget(self.reset_btn)
+        group.setLayout(layout)
+        return group
+
+    def _setup_ui(self):
+        """Initialize the user interface"""
+        # Create right side container
+        right_container = QWidget()
+        right_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        right_container.setFixedWidth(350)
+
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(8)
+        right_layout.setContentsMargins(6, 6, 6, 6)
+
+        # Create and add groups
+        right_layout.addWidget(self._create_intensity_group())
+        right_layout.addWidget(self._create_filter_group())
+        right_layout.addWidget(self._create_preview_group())
+        right_layout.addWidget(self._create_action_group())
+
+        # Add status section
+        status_layout = QVBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        status_layout.addWidget(self.progress_bar)
+        status_layout.addWidget(self.status_label)
+        right_layout.addLayout(status_layout)
+
+        right_layout.addStretch()
+        right_container.setLayout(right_layout)
+
+        # Add to the main layout
+        self.main_layout.addWidget(right_container)
+        self.main_layout.addStretch(1)
+
+        # Register controls
         self._register_controls()
 
-        # Connect button signals
-        self.preprocess_btn.clicked.connect(self.run_preprocessing)
-        self.reset_btn.clicked.connect(self.reset_parameters)
     def _create_filter_controls(self, form_layout: QFormLayout):
         """Create filter parameter controls"""
 
@@ -186,8 +263,12 @@ class PreprocessingWidget(BaseAnalysisWidget):
             self.reset_btn
         ]:
             self.register_control(control)
+
     def _connect_signals(self):
         """Connect widget signals"""
+        self.preprocess_btn.clicked.connect(self.run_preprocessing)
+        self.reset_btn.clicked.connect(self.reset_parameters)
+
         # Intensity range
         self.intensity_slider.valueChanged.connect(self._update_from_intensity_slider)
         self.min_spin.valueChanged.connect(self._update_from_intensity_spinboxes)
