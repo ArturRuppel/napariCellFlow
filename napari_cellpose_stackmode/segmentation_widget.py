@@ -232,6 +232,10 @@ class SegmentationWidget(BaseAnalysisWidget):
             self._processing = True
             self._update_ui_state()
 
+            # Update model with current parameters
+            current_params = self._get_current_parameters()
+            self.segmentation.params = current_params
+
             if not self._ensure_model_initialized():
                 return
 
@@ -277,6 +281,10 @@ class SegmentationWidget(BaseAnalysisWidget):
         try:
             self._processing = True
             self._update_ui_state()
+
+            # Update model with current parameters
+            current_params = self._get_current_parameters()
+            self.segmentation.params = current_params
 
             image_layer = self._get_active_image_layer()
             if image_layer is None:
@@ -412,7 +420,8 @@ class SegmentationWidget(BaseAnalysisWidget):
             cellprob_threshold=self.prob_spin.value(),
             min_size=self.size_spin.value(),
             gpu=self.gpu_check.isChecked(),
-            normalize=self.normalize_check.isChecked()
+            normalize=self.normalize_check.isChecked(),
+            compute_diameter=self.compute_diameter_check.isChecked()
         )
 
     def cleanup(self):
