@@ -32,7 +32,7 @@ class napariCellFlow(QWidget):
         container.setLayout(container_layout)
 
         # Add title
-        title = QLabel("Cellpose Stackmode")
+        title = QLabel("napariCellFlow")
         title.setStyleSheet("font-weight: bold; font-size: 14px;")
         container_layout.addWidget(title)
 
