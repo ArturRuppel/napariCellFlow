@@ -214,6 +214,8 @@ class PreprocessingWidget(BaseAnalysisWidget):
             spin.setValue(default_val)
             spin.setSingleStep(step if not odd_only else 2)
             spin.setFixedWidth(80)
+            if double:
+                spin.setDecimals(1)
             if checkbox:
                 spin.setEnabled(False)
             control_layout.addWidget(spin)
