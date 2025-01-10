@@ -84,8 +84,17 @@ class CellCorrectionWidget(QWidget):
         self.masks_layer = None
         if self.vis_manager.tracking_layer is not None:
             self.masks_layer = self.vis_manager.tracking_layer
+            # Initialize next_cell_id based on existing data
+            if self.masks_layer.data is not None:
+                self.next_cell_id = int(np.max(self.masks_layer.data)) + 1
+            else:
+                self.next_cell_id = 1
         elif hasattr(self.data_manager, 'segmentation_data') and self.data_manager.segmentation_data is not None:
             self.set_masks_layer(self.data_manager.segmentation_data)
+            # Initialize next_cell_id based on existing data
+            self.next_cell_id = int(np.max(self.data_manager.segmentation_data)) + 1
+        else:
+            self.next_cell_id = 1
 
         # Store full stack reference
         self._full_stack = None
@@ -121,7 +130,175 @@ class CellCorrectionWidget(QWidget):
         self._setup_shortcuts()
         QApplication.instance().installEventFilter(self)
 
+    def _setup_ui(self):
+        """Initialize the user interface"""
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # Status label
+        self.status_label = QLabel("Ready")
+        layout.addWidget(self.status_label)
+
+        # Updated instructions
+        instructions = QLabel(
+            "Cell Editing Controls:\n"
+            "- Hold Ctrl + Left click to delete cells\n"
+            "- Hold Ctrl + Right click and drag to draw cell boundary\n"
+            "- Return to start point (marked with circle) to complete the cell\n"
+            "- Ctrl+Z to undo last action"
+        )
+        instructions.setWordWrap(True)
+        instructions.setMinimumHeight(120)  # Ensure enough vertical space
+        layout.addWidget(instructions)
+
+    def _update_ui_state(self):
+        """Update UI elements based on current state"""
+        try:
+            # Simple status update
+            if self.is_drawing:
+                self.status_label.setText("Cell editing enabled")
+            else:
+                self.status_label.setText("Hold Ctrl to enable cell editing")
+
+        except Exception as e:
+            logger.error(f"CellCorrection: Error updating UI state: {e}")
+
+    def _connect_events(self):
+        """Connect all event handlers"""
+        # Remove any existing callbacks first
+        if self._on_mouse_drag in self.viewer.mouse_drag_callbacks:
+            self.viewer.mouse_drag_callbacks.remove(self._on_mouse_drag)
+        if self._on_mouse_move in self.viewer.mouse_move_callbacks:
+            self.viewer.mouse_move_callbacks.remove(self._on_mouse_move)
+        if self._on_mouse_wheel in self.viewer.mouse_wheel_callbacks:
+            self.viewer.mouse_wheel_callbacks.remove(self._on_mouse_wheel)
+
+        # Add mouse callbacks explicitly to viewer
+        self.viewer.mouse_drag_callbacks.append(self._on_mouse_drag)
+        self.viewer.mouse_move_callbacks.append(self._on_mouse_move)
+        self.viewer.mouse_wheel_callbacks.append(self._on_mouse_wheel)
+
+    def _on_mouse_drag(self, viewer, event):
+        """Handle mouse drag events"""
+        try:
+            if self.masks_layer is None and self.vis_manager.tracking_layer is not None:
+                self.masks_layer = self.vis_manager.tracking_layer
+
+            if self.masks_layer is None:
+                return
+
+            pos = viewer.cursor.position
+            coords = np.round(pos).astype(int)[-2:]
+
+            if event.button == Qt.RightButton and self.is_drawing:
+                if not self.drawing_started:
+                    self.drawing_started = True
+                    self.start_point = coords
+                    self.drawing_points = [coords]
+                    self._update_drawing_preview()
+                else:
+                    self.drawing_points.append(coords)
+                    self._update_drawing_preview()
+            elif event.button == Qt.LeftButton and self.is_drawing:
+                self._delete_cell_at_position(coords)
+
+        except Exception as e:
+            logger.error(f"CellCorrection: Error in mouse drag: {e}", exc_info=True)
+
+    def _update_drawing_state(self):
+        """Update drawing state with proper synchronization."""
+        try:
+            new_drawing_state = self.ctrl_pressed
+
+            # Only update if state actually changes
+            if new_drawing_state == self.is_drawing:
+                return
+
+            self.is_drawing = new_drawing_state
+
+            # Only update UI if we're not actively drawing
+            if not self.drawing_started:
+                with self.viewer.events.blocker_all():
+                    self._update_ui_state()
+                    if not new_drawing_state:
+                        self._clear_drawing()
+
+            # Single refresh at the end if needed
+            if self.masks_layer and self.masks_layer in self.viewer.layers:
+                self.masks_layer.refresh()
+
+        except Exception as e:
+            logger.error(f"CellCorrection: Error updating drawing state: {e}")
+
+    def _delete_cell_at_position(self, coords):
+        """Delete cell at the given coordinates."""
+        if self._updating or not self._validate_coords(coords):
+            return
+
+        current_mask = self._get_current_frame_mask()
+        if current_mask is None:
+            return
+
+        cell_id = current_mask[coords[0], coords[1]]
+        if cell_id > 0:
+            try:
+                # Store current state for undo
+                if self.vis_manager.tracking_layer is not None:
+                    prev_state = self.vis_manager.tracking_layer.data.copy()
+                    if prev_state.ndim == 2:
+                        prev_state = prev_state[np.newaxis, ...]
+
+                    action = UndoAction(
+                        action_type=ActionType.DELETE,
+                        frame=int(self.viewer.dims.point[0]),
+                        previous_state=prev_state,
+                        description=f"Delete cell {cell_id}",
+                        affected_cell_ids={cell_id}
+                    )
+                    self.undo_stack.append(action)
+
+                self._updating = True
+
+                # Create a copy of just the current frame
+                new_frame = current_mask.copy()
+                new_frame[new_frame == cell_id] = 0
+
+                # Get current frame index
+                current_slice = int(self.viewer.dims.point[0])
+
+                # Update data manager
+                self.data_manager.segmentation_data = (new_frame, current_slice)
+
+                # Update visualization
+                self.vis_manager.update_tracking_visualization(
+                    (new_frame, current_slice)
+                )
+
+                self.status_label.setText(f"Deleted cell {cell_id}")
+
+            finally:
+                self._updating = False
+
+    def eventFilter(self, watched_object, event):
+        """Global event filter to catch key events regardless of focus"""
+        if event.type() not in (event.KeyPress, event.KeyRelease):
+            return False
+
+        if event.key() != Qt.Key_Control:
+            return False
+
+        try:
+            is_press = event.type() == event.KeyPress
+            self.ctrl_pressed = is_press
+            self._update_drawing_state()
+            return False
+
+        except Exception as e:
+            logger.error(f"CellCorrection: Error handling Ctrl key: {e}")
+            return False
+
     def _finish_drawing(self):
+        """Complete the cell drawing and save it"""
         if not self.drawing_points or len(self.drawing_points) < 3:
             logger.debug("CellCorrection: Not enough points to complete drawing")
             self._clear_drawing()
@@ -138,41 +315,58 @@ class CellCorrectionWidget(QWidget):
                 raise ValueError("No tracking layer available")
 
             # Get current state BEFORE any changes for undo
-            if self.vis_manager.tracking_layer is not None:
-                prev_state = self.vis_manager.tracking_layer.data.copy()
-                if prev_state.ndim == 2:
-                    prev_state = prev_state[np.newaxis, ...]
+            prev_state = self.vis_manager.tracking_layer.data.copy()
+            if prev_state.ndim == 2:
+                prev_state = prev_state[np.newaxis, ...]
 
-                # Create and store undo action before making changes
-                action = UndoAction(
-                    action_type=ActionType.DRAW,
-                    frame=current_frame,
-                    previous_state=prev_state,
-                    description=f"Draw new cell {self.next_cell_id}",
-                    affected_cell_ids={self.next_cell_id}
-                )
-                self.undo_stack.append(action)
-                self.undo_btn.setEnabled(True)
+            # Update next_cell_id to be one more than the current maximum
+            current_max = int(np.max(prev_state)) if prev_state.size > 0 else 0
+            self.next_cell_id = max(self.next_cell_id, current_max + 1)
 
-            # Get a deep copy of the full stack
-            full_stack = self.vis_manager.tracking_layer.data.copy()
-            self.next_cell_id = int(full_stack.max()) + 1
+            # Create and store undo action
+            action = UndoAction(
+                action_type=ActionType.DRAW,
+                frame=current_frame,
+                previous_state=prev_state,
+                description=f"Draw new cell {self.next_cell_id}",
+                affected_cell_ids={self.next_cell_id}
+            )
+            self.undo_stack.append(action)
+
+            # Get current frame shape
+            frame_shape = (self.vis_manager.tracking_layer.data.shape[1:]
+                           if len(self.vis_manager.tracking_layer.data.shape) == 3
+                           else self.vis_manager.tracking_layer.data.shape)
 
             # Create new cell mask
-            frame_shape = full_stack.shape[1:]
             new_cell_mask = self._create_cell_mask(frame_shape)
 
-            # Update current frame data
-            current_frame_data = full_stack[current_frame].copy()
+            # Get current frame data
+            if len(self.vis_manager.tracking_layer.data.shape) == 3:
+                current_frame_data = self.vis_manager.tracking_layer.data[current_frame].copy()
+            else:
+                current_frame_data = self.vis_manager.tracking_layer.data.copy()
+
+            # Update the mask
             empty_mask = (current_frame_data == 0)
             add_mask = np.logical_and(new_cell_mask > 0, empty_mask)
             current_frame_data[add_mask] = self.next_cell_id
-            full_stack[current_frame] = current_frame_data
 
-            # Update visualization and data
-            self.vis_manager.update_tracking_visualization(full_stack)
-            self.data_manager.segmentation_data = full_stack
+            # Update data manager and visualization
+            if len(self.vis_manager.tracking_layer.data.shape) == 3:
+                self.data_manager.segmentation_data = (current_frame_data, current_frame)
+            else:
+                self.data_manager.segmentation_data = current_frame_data
+
+            # Update visualization
+            self.vis_manager.update_tracking_visualization(
+                (current_frame_data, current_frame) if len(self.vis_manager.tracking_layer.data.shape) == 3
+                else current_frame_data
+            )
+
             self.status_label.setText(f"Added new cell {self.next_cell_id}")
+
+            # Increment next_cell_id after successful creation
             self.next_cell_id += 1
 
         except Exception as e:
@@ -183,58 +377,6 @@ class CellCorrectionWidget(QWidget):
             self.drawing_started = False
             self.start_point = None
             self._clear_drawing()
-
-    def _delete_cell_at_position(self, coords):
-        """Delete cell at the given coordinates."""
-        if self._updating or not self._validate_coords(coords):
-            logger.debug("Deletion skipped - updating flag or invalid coords")
-            return
-
-        current_mask = self._get_current_frame_mask()
-        if current_mask is None:
-            logger.debug("Deletion skipped - no current mask")
-            return
-
-        cell_id = current_mask[coords[0], coords[1]]
-        if cell_id > 0:
-            try:
-                # Store current state BEFORE making changes
-                if self.vis_manager.tracking_layer is not None:
-                    prev_state = self.vis_manager.tracking_layer.data.copy()
-                    if prev_state.ndim == 2:
-                        prev_state = prev_state[np.newaxis, ...]
-
-                    # Create and store undo action
-                    action = UndoAction(
-                        action_type=ActionType.DELETE,
-                        frame=int(self.viewer.dims.point[0]),
-                        previous_state=prev_state,
-                        description=f"Delete cell {cell_id}",
-                        affected_cell_ids={cell_id}
-                    )
-                    self.undo_stack.append(action)
-                    self.undo_btn.setEnabled(True)
-
-                self._updating = True
-
-                # Create a copy of just the current frame
-                new_frame = current_mask.copy()
-                new_frame[new_frame == cell_id] = 0
-
-                # Get current frame index
-                current_slice = int(self.viewer.dims.point[0])
-
-                # Update only the current frame in data manager
-                self.data_manager.segmentation_data = (new_frame, current_slice)
-
-                # Update visualization for single frame
-                self.vis_manager.update_tracking_visualization(
-                    (new_frame, current_slice)
-                )
-
-            finally:
-                self._updating = False
-
     def _setup_shortcuts(self):
         """Set up keyboard shortcuts"""
         try:
@@ -375,89 +517,6 @@ class CellCorrectionWidget(QWidget):
             data = data[np.newaxis, ...]
         self._full_stack = data.copy()
 
-    def _setup_ui(self):
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-
-        # Status label
-        self.status_label = QLabel("Ready")
-        layout.addWidget(self.status_label)
-
-        # Control buttons in a horizontal layout
-        buttons_layout = QHBoxLayout()
-
-        # Drawing mode toggle
-        self.toggle_draw_btn = QPushButton("Toggle Drawing Mode (or hold Ctrl)")
-        self.toggle_draw_btn.setCheckable(True)
-        buttons_layout.addWidget(self.toggle_draw_btn)
-
-        # Undo button
-        self.undo_btn = QPushButton("Undo (Ctrl+Z)")
-        self.undo_btn.setEnabled(False)
-        buttons_layout.addWidget(self.undo_btn)
-
-        layout.addLayout(buttons_layout)
-
-        # Updated instructions
-        instructions = QLabel(
-            "Drawing Mode:\n"
-            "- Hold Ctrl + Left click to delete cells\n"
-            "- Hold Ctrl + Right click and drag to draw cell boundary\n"
-            "- Return to start point (marked with circle) to complete the cell\n"
-            "- Ctrl+Z to undo last action"
-        )
-        instructions.setWordWrap(True)
-        layout.addWidget(instructions)
-
-    def eventFilter(self, watched_object, event):
-        """Global event filter to catch key events regardless of focus"""
-        if event.type() not in (event.KeyPress, event.KeyRelease):
-            return super().eventFilter(watched_object, event)
-
-        if event.key() != Qt.Key_Control:
-            return False
-
-        try:
-            is_press = event.type() == event.KeyPress
-            logger.debug(f"CellCorrection: Ctrl key {'pressed' if is_press else 'released'}")
-
-            # Only update state if we're not actively drawing
-            if not self.drawing_started:
-                self.ctrl_pressed = is_press
-                self._update_drawing_state()
-
-            return False  # Don't consume the event
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error handling Ctrl key: {e}")
-            return False
-
-    def _update_drawing_state(self):
-        """Update drawing state with proper synchronization."""
-        try:
-            new_drawing_state = self.toggle_state or self.ctrl_pressed
-
-            # Only update if state actually changes
-            if new_drawing_state == self.is_drawing:
-                return
-
-            logger.debug(f"CellCorrection: Drawing state changing from {self.is_drawing} to {new_drawing_state}")
-            self.is_drawing = new_drawing_state
-
-            # Only update UI if we're not actively drawing
-            if not self.drawing_started:
-                with self.viewer.events.blocker_all():
-                    self._update_ui_state()
-                    if not new_drawing_state:
-                        self._clear_drawing()
-
-            # Single refresh at the end if needed
-            if self.masks_layer and self.masks_layer in self.viewer.layers:
-                self.masks_layer.refresh()
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error updating drawing state: {e}")
-
     def _clear_drawing(self):
         try:
             logger.debug("CellCorrection: Starting drawing clear")
@@ -477,57 +536,6 @@ class CellCorrectionWidget(QWidget):
 
         except Exception as e:
             logger.error(f"CellCorrection: Error clearing drawing: {e}")
-
-    def _update_ui_state(self):
-        """Update UI elements based on current state"""
-        try:
-            # Update status label based on mode
-            if self.is_drawing:
-                self.status_label.setText("Drawing Mode: Right-click and drag to draw cell contour")
-            else:
-                self.status_label.setText("Selection Mode: Right-click to select cells")
-
-            # Update button state
-            self.toggle_draw_btn.blockSignals(True)
-            self.toggle_draw_btn.setChecked(self.is_drawing)
-            self.toggle_draw_btn.blockSignals(False)
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error updating UI state: {e}")
-
-    def _on_mouse_drag(self, viewer, event):
-        """Handle mouse drag events"""
-        try:
-            if self.masks_layer is None and self.vis_manager.tracking_layer is not None:
-                logger.debug("CellCorrection: Recovering masks layer from visualization manager")
-                self.masks_layer = self.vis_manager.tracking_layer
-
-            if self.masks_layer is None:
-                logger.debug("CellCorrection: No masks layer available")
-                return
-
-            pos = viewer.cursor.position
-            coords = np.round(pos).astype(int)[-2:]
-
-            if event.button == Qt.RightButton:
-                if self.is_drawing:
-                    if not self.drawing_started:
-                        logger.debug("CellCorrection: Starting new drawing")
-                        self.drawing_started = True
-                        self.start_point = coords
-                        self.drawing_points = [coords]
-                        self._update_drawing_preview()
-                    else:
-                        logger.debug("CellCorrection: Adding point to drawing")
-                        self.drawing_points.append(coords)
-                        self._update_drawing_preview()
-                else:
-                    self._handle_selection(coords)
-            elif event.button == Qt.LeftButton and self.is_drawing:
-                self._delete_cell_at_position(coords)
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error in mouse drag: {e}", exc_info=True)
 
     def _initialize_or_recover_layer(self):
         """Initialize or recover the masks layer."""
@@ -717,29 +725,6 @@ class CellCorrectionWidget(QWidget):
         if event.value == self.masks_layer:
             self.masks_layer = None
             self._full_masks = None
-
-    def _connect_events(self):
-        """Connect all event handlers"""
-        # Remove any existing callbacks first
-        if self._on_mouse_drag in self.viewer.mouse_drag_callbacks:
-            self.viewer.mouse_drag_callbacks.remove(self._on_mouse_drag)
-        if self._on_mouse_move in self.viewer.mouse_move_callbacks:
-            self.viewer.mouse_move_callbacks.remove(self._on_mouse_move)
-        if self._on_mouse_wheel in self.viewer.mouse_wheel_callbacks:
-            self.viewer.mouse_wheel_callbacks.remove(self._on_mouse_wheel)
-
-        # Add mouse callbacks explicitly to viewer
-        self.viewer.mouse_drag_callbacks.append(self._on_mouse_drag)
-        self.viewer.mouse_move_callbacks.append(self._on_mouse_move)
-        self.viewer.mouse_wheel_callbacks.append(self._on_mouse_wheel)
-
-        print("Mouse callbacks connected")  # Debug
-
-        # Add toggle button connection
-        self.toggle_draw_btn.toggled.connect(self._handle_toggle_button)
-
-        # Add undo button connection
-        self.undo_btn.clicked.connect(self.undo_last_action)
 
     def _handle_toggle_button(self, checked):
         """Handle toggle button state changes"""
