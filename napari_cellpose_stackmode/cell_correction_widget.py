@@ -130,6 +130,205 @@ class CellCorrectionWidget(QWidget):
         self._setup_shortcuts()
         QApplication.instance().installEventFilter(self)
 
+    def _update_drawing_preview(self):
+        """Update the preview of the cell being drawn with optimized initialization."""
+        if not self.drawing_points or len(self.drawing_points) < 2:
+            return
+
+        try:
+            # Ensure we have a valid masks layer
+            if self.masks_layer is None or self.masks_layer not in self.viewer.layers:
+                if self.vis_manager.tracking_layer is not None:
+                    self.masks_layer = self.vis_manager.tracking_layer
+                else:
+                    return
+
+            current_frame = int(self.viewer.dims.point[0])
+
+            # Get shape for current frame only
+            frame_shape = (self.masks_layer.data.shape[1:]
+                           if len(self.masks_layer.data.shape) == 3
+                           else self.masks_layer.data.shape)
+
+            # Create or update drawing layer - OPTIMIZED to only create a single frame
+            if self.drawing_layer is None or self.drawing_layer not in self.viewer.layers:
+                # Only create a 2D array for the current frame
+                preview_data = np.zeros(frame_shape, dtype=np.uint8)
+
+                self.drawing_layer = self.viewer.add_labels(
+                    preview_data,
+                    name='Drawing Preview',
+                    opacity=0.8,
+                    visible=True
+                )
+
+            # Create mask only for current frame
+            mask = np.zeros(frame_shape, dtype=np.uint8)
+
+            # Convert points to format needed by OpenCV
+            points = np.array(self.drawing_points, dtype=np.int32)
+
+            # Draw lines efficiently
+            if len(points) >= 2:
+                # Use polylines instead of individual lines
+                cv2.polylines(mask, [points[:, ::-1]], False, self.LINE_COLOR, self.LINE_THICKNESS)
+
+            # Draw start point circle if it exists
+            if self.start_point is not None:
+                center = (int(self.start_point[1]), int(self.start_point[0]))
+                cv2.circle(mask, center, self.START_POINT_RADIUS, self.LINE_COLOR, -1)
+
+            # Update the preview layer - OPTIMIZED to avoid unnecessary operations
+            self.drawing_layer.data = mask
+
+            # Ensure proper layer visibility
+            self.drawing_layer.visible = True
+            if self.masks_layer is not None:
+                self.masks_layer.visible = True
+
+        except Exception as e:
+            logger.error(f"Error updating drawing preview: {e}")
+            self._clear_drawing()
+
+    def _clear_drawing(self):
+        """Optimized drawing cleanup."""
+        try:
+            if self.drawing_layer is not None and self.drawing_layer in self.viewer.layers:
+                # Remove layer immediately without additional checks
+                self.viewer.layers.remove(self.drawing_layer)
+                self.drawing_layer = None
+
+            # Ensure main layer stays visible
+            if self.masks_layer is not None and self.masks_layer in self.viewer.layers:
+                self.masks_layer.visible = True
+
+        except Exception as e:
+            logger.error(f"Error clearing drawing: {e}")
+
+    def _finish_drawing(self):
+        """Complete the cell drawing with optimized updates."""
+        if not self.drawing_points or len(self.drawing_points) < 3:
+            self._clear_drawing()
+            return
+
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+            current_frame = int(self.viewer.dims.point[0])
+
+            if not self.vis_manager.tracking_layer:
+                raise ValueError("No tracking layer available")
+
+            # Get only the necessary data for undo
+            if len(self.vis_manager.tracking_layer.data.shape) == 3:
+                prev_state = self.vis_manager.tracking_layer.data[current_frame].copy()
+            else:
+                prev_state = self.vis_manager.tracking_layer.data.copy()
+
+            # Update next_cell_id
+            current_max = int(np.max(prev_state)) if prev_state.size > 0 else 0
+            self.next_cell_id = max(self.next_cell_id, current_max + 1)
+
+            # Create undo action (store only the affected frame)
+            action = UndoAction(
+                action_type=ActionType.DRAW,
+                frame=current_frame,
+                previous_state=prev_state[np.newaxis, ...] if prev_state.ndim == 2 else prev_state,
+                description=f"Draw new cell {self.next_cell_id}",
+                affected_cell_ids={self.next_cell_id}
+            )
+            self.undo_stack.append(action)
+
+            # Create new cell mask (already optimized in previous version)
+            frame_shape = prev_state.shape
+            new_cell_mask = self._create_cell_mask(frame_shape)
+
+            # Update only the necessary frame
+            if len(self.vis_manager.tracking_layer.data.shape) == 3:
+                current_frame_data = self.vis_manager.tracking_layer.data[current_frame].copy()
+            else:
+                current_frame_data = self.vis_manager.tracking_layer.data.copy()
+
+            # Efficient mask update
+            current_frame_data[new_cell_mask > 0] = self.next_cell_id
+
+            # Update data manager and visualization
+            self.data_manager.segmentation_data = (
+                (current_frame_data, current_frame)
+                if len(self.vis_manager.tracking_layer.data.shape) == 3
+                else current_frame_data
+            )
+
+            self.vis_manager.update_tracking_visualization(
+                (current_frame_data, current_frame)
+                if len(self.vis_manager.tracking_layer.data.shape) == 3
+                else current_frame_data
+            )
+
+            self.next_cell_id += 1
+
+        finally:
+            self._updating = False
+            self.drawing_started = False
+            self.start_point = None
+            self._clear_drawing()
+
+    def _on_mouse_move(self, viewer, event):
+        """Handle mouse movement with optimized updates."""
+        if not self.is_drawing or not self.drawing_started:
+            return
+
+        pos = viewer.cursor.position
+        coords = np.round(pos).astype(int)[-2:]
+
+        if self._validate_coords(coords):
+            # Add point with minimum distance threshold
+            MIN_DISTANCE = 3  # Reduced from 5 to maintain responsiveness
+
+            if not self.drawing_points:
+                self.drawing_points.append(coords)
+                self._update_drawing_preview()
+            else:
+                dist_to_last = np.linalg.norm(coords - self.drawing_points[-1])
+                if dist_to_last >= MIN_DISTANCE:
+                    self.drawing_points.append(coords)
+
+                    # Check for closure with enough points
+                    if len(self.drawing_points) > self.MIN_DRAWING_POINTS:
+                        dist_to_start = np.linalg.norm(coords - self.start_point)
+                        if dist_to_start < self.CLOSURE_THRESHOLD:
+                            self._finish_drawing()
+                            return
+
+                    self._update_drawing_preview()
+
+    def _create_cell_mask(self, frame_shape):
+        """Create a mask for the new cell with optimized performance."""
+        mask = np.zeros(frame_shape, dtype=np.uint8)
+        if len(self.drawing_points) < 3:
+            return mask
+
+        try:
+            # Convert points once and ensure they're the right type
+            points = np.array(self.drawing_points + [self.start_point], dtype=np.int32)
+
+            # Ensure points are within bounds
+            points = np.clip(points, 0, np.array(frame_shape) - 1)
+
+            # Create polygon points in the correct format for OpenCV
+            polygon_points = points[:, ::-1]  # Swap x,y coordinates for OpenCV
+
+            # Fill the polygon
+            cv2.fillPoly(mask, [polygon_points], 1)
+
+            return mask
+        except Exception as e:
+            logger.error(f"Error creating cell mask: {e}")
+            return np.zeros(frame_shape, dtype=np.uint8)
+
+
     def _setup_ui(self):
         """Initialize the user interface"""
         layout = QVBoxLayout()
@@ -150,6 +349,7 @@ class CellCorrectionWidget(QWidget):
         instructions.setWordWrap(True)
         instructions.setMinimumHeight(120)  # Ensure enough vertical space
         layout.addWidget(instructions)
+
 
     def _update_ui_state(self):
         """Update UI elements based on current state"""
@@ -297,86 +497,6 @@ class CellCorrectionWidget(QWidget):
             logger.error(f"CellCorrection: Error handling Ctrl key: {e}")
             return False
 
-    def _finish_drawing(self):
-        """Complete the cell drawing and save it"""
-        if not self.drawing_points or len(self.drawing_points) < 3:
-            logger.debug("CellCorrection: Not enough points to complete drawing")
-            self._clear_drawing()
-            return
-
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-            current_frame = int(self.viewer.dims.point[0])
-
-            if not self.vis_manager.tracking_layer:
-                raise ValueError("No tracking layer available")
-
-            # Get current state BEFORE any changes for undo
-            prev_state = self.vis_manager.tracking_layer.data.copy()
-            if prev_state.ndim == 2:
-                prev_state = prev_state[np.newaxis, ...]
-
-            # Update next_cell_id to be one more than the current maximum
-            current_max = int(np.max(prev_state)) if prev_state.size > 0 else 0
-            self.next_cell_id = max(self.next_cell_id, current_max + 1)
-
-            # Create and store undo action
-            action = UndoAction(
-                action_type=ActionType.DRAW,
-                frame=current_frame,
-                previous_state=prev_state,
-                description=f"Draw new cell {self.next_cell_id}",
-                affected_cell_ids={self.next_cell_id}
-            )
-            self.undo_stack.append(action)
-
-            # Get current frame shape
-            frame_shape = (self.vis_manager.tracking_layer.data.shape[1:]
-                           if len(self.vis_manager.tracking_layer.data.shape) == 3
-                           else self.vis_manager.tracking_layer.data.shape)
-
-            # Create new cell mask
-            new_cell_mask = self._create_cell_mask(frame_shape)
-
-            # Get current frame data
-            if len(self.vis_manager.tracking_layer.data.shape) == 3:
-                current_frame_data = self.vis_manager.tracking_layer.data[current_frame].copy()
-            else:
-                current_frame_data = self.vis_manager.tracking_layer.data.copy()
-
-            # Update the mask
-            empty_mask = (current_frame_data == 0)
-            add_mask = np.logical_and(new_cell_mask > 0, empty_mask)
-            current_frame_data[add_mask] = self.next_cell_id
-
-            # Update data manager and visualization
-            if len(self.vis_manager.tracking_layer.data.shape) == 3:
-                self.data_manager.segmentation_data = (current_frame_data, current_frame)
-            else:
-                self.data_manager.segmentation_data = current_frame_data
-
-            # Update visualization
-            self.vis_manager.update_tracking_visualization(
-                (current_frame_data, current_frame) if len(self.vis_manager.tracking_layer.data.shape) == 3
-                else current_frame_data
-            )
-
-            self.status_label.setText(f"Added new cell {self.next_cell_id}")
-
-            # Increment next_cell_id after successful creation
-            self.next_cell_id += 1
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error finishing drawing: {e}")
-            raise
-        finally:
-            self._updating = False
-            self.drawing_started = False
-            self.start_point = None
-            self._clear_drawing()
     def _setup_shortcuts(self):
         """Set up keyboard shortcuts"""
         try:
@@ -517,25 +637,6 @@ class CellCorrectionWidget(QWidget):
             data = data[np.newaxis, ...]
         self._full_stack = data.copy()
 
-    def _clear_drawing(self):
-        try:
-            logger.debug("CellCorrection: Starting drawing clear")
-
-            # Only remove drawing preview layer
-            if self.drawing_layer is not None and self.drawing_layer in self.viewer.layers:
-                with self.viewer.events.blocker_all():
-                    self.viewer.layers.remove(self.drawing_layer)
-                self.drawing_layer = None
-
-            # Ensure we maintain reference to the correct segmentation layer
-            if self.vis_manager.tracking_layer is not None:
-                self.masks_layer = self.vis_manager.tracking_layer
-
-            if self.masks_layer is not None and self.masks_layer in self.viewer.layers:
-                self.masks_layer.visible = True
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error clearing drawing: {e}")
 
     def _initialize_or_recover_layer(self):
         """Initialize or recover the masks layer."""
@@ -549,82 +650,6 @@ class CellCorrectionWidget(QWidget):
                     logger.debug("CellCorrection: No tracking layer available")
         except Exception as e:
             logger.error(f"CellCorrection: Error initializing/recovering layer: {e}")
-
-    def _update_drawing_preview(self):
-        """Update the preview of the cell being drawn."""
-        if not self.drawing_points or len(self.drawing_points) < 2:
-            return
-
-        try:
-            # Ensure we have a valid masks layer
-            if self.masks_layer is None or self.masks_layer not in self.viewer.layers:
-                if self.vis_manager.tracking_layer is not None:
-                    self.masks_layer = self.vis_manager.tracking_layer
-                else:
-                    return
-
-            # Get current frame and shape
-            current_frame = int(self.viewer.dims.point[0])
-            shape = (self.masks_layer.data.shape[1:]
-                     if len(self.masks_layer.data.shape) == 3
-                     else self.masks_layer.data.shape)
-
-            # Create or update drawing layer
-            if self.drawing_layer is None or self.drawing_layer not in self.viewer.layers:
-                preview_shape = (self.masks_layer.data.shape
-                                 if len(self.masks_layer.data.shape) == 3
-                                 else shape)
-                preview_data = np.zeros(preview_shape, dtype=np.uint8)
-
-                self.drawing_layer = self.viewer.add_labels(
-                    preview_data,
-                    name='Drawing Preview',
-                    opacity=0.8,
-                    visible=True
-                )
-
-            # Keep both layers visible
-            self.drawing_layer.visible = True
-            self.masks_layer.visible = True
-
-            # Create mask for current frame
-            if len(self.masks_layer.data.shape) == 3:
-                preview_data = self.drawing_layer.data.copy()
-                mask = np.zeros(shape, dtype=np.uint8)
-            else:
-                preview_data = np.zeros_like(self.masks_layer.data)
-                mask = preview_data
-
-            # Draw the preview
-            points = np.array(self.drawing_points)
-            for i in range(len(points) - 1):
-                p1 = (int(points[i][1]), int(points[i][0]))
-                p2 = (int(points[i + 1][1]), int(points[i + 1][0]))
-                cv2.line(mask, p1, p2, self.LINE_COLOR, self.LINE_THICKNESS)
-
-            # Draw start point circle
-            if self.start_point is not None:
-                center = (int(self.start_point[1]), int(self.start_point[0]))
-                cv2.circle(mask, center, self.START_POINT_RADIUS, self.LINE_COLOR, -1)
-
-            # Update the preview layer data
-            if len(self.masks_layer.data.shape) == 3:
-                preview_data[current_frame] = mask
-                self.drawing_layer.data = preview_data
-            else:
-                self.drawing_layer.data = mask
-
-        except Exception as e:
-            logger.error(f"Error updating drawing preview: {e}")
-            self._clear_drawing()
-
-    def _create_cell_mask(self, frame_shape):
-        """Create a mask for the new cell"""
-        new_cell_mask = np.zeros(frame_shape, dtype=np.uint8)
-        points = np.array(self.drawing_points + [self.start_point])
-        points = np.clip(points, 0, np.array(frame_shape) - 1).astype(np.int32)
-        cv2.fillPoly(new_cell_mask, [points[:, ::-1]], 1)
-        return new_cell_mask
 
     def _handle_layer_added(self, event):
         """Handle when a new layer is added to the viewer"""
@@ -819,28 +844,6 @@ class CellCorrectionWidget(QWidget):
 
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
-
-    def _on_mouse_move(self, viewer, event):
-        """Handle mouse movement for drawing preview."""
-        if not self.is_drawing or not self.drawing_started:
-            return
-
-        pos = self.viewer.cursor.position
-        coords = np.round(pos).astype(int)[-2:]  # Take last 2 dimensions for y,x
-
-        if self._validate_coords(coords):
-            # Add point if it's different from the last point
-            if not self.drawing_points or not np.array_equal(coords, self.drawing_points[-1]):
-                self.drawing_points.append(coords)
-
-                # Only check for closure if we have enough points
-                if len(self.drawing_points) > self.MIN_DRAWING_POINTS:
-                    dist_to_start = np.linalg.norm(coords - self.start_point)
-                    if dist_to_start < self.CLOSURE_THRESHOLD:
-                        self._finish_drawing()
-                        return
-
-                self._update_drawing_preview()
 
     def _handle_layer_removed(self, event):
         """Handle layer removal events."""
