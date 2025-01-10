@@ -117,11 +117,9 @@ class CellTrackingWidget(BaseAnalysisWidget):
         """Run cell tracking with current parameters"""
         try:
             logger.debug("Starting cell tracking analysis")
-
-            # Emit processing started signal
             self.processing_started.emit()
 
-            # Get active layer
+            # Get and validate active layer
             active_layer = self._get_active_labels_layer()
             if active_layer is None:
                 raise ProcessingError(
@@ -129,26 +127,23 @@ class CellTrackingWidget(BaseAnalysisWidget):
                     "Please select a layer containing cell segmentation"
                 )
 
-            logger.debug(f"Active layer found: {active_layer.name}")
-
-            # Get and validate the stack
             stack = active_layer.data
             if stack is None:
                 raise ProcessingError("Empty layer data")
 
-            logger.debug(f"Retrieved stack: shape={stack.shape}, dtype={stack.dtype}")
-
-            # Thorough validation
             self._validate_stack(stack)
-
-            # Disable controls during processing
             self._set_controls_enabled(False)
-            self._update_status("Starting cell tracking...", 0)
+
+            # Set up progress callback
+            def update_progress(progress: float, message: str = ""):
+                self._update_status(message, int(progress))
+
+            # Configure tracker with progress callback
+            self.tracker.set_progress_callback(update_progress)
 
             # Ensure proper data format
             try:
                 stack = self._ensure_stack_format(stack)
-                logger.debug(f"Stack formatted: shape={stack.shape}")
             except Exception as e:
                 logger.error(f"Failed to format stack: {str(e)}", exc_info=True)
                 raise ProcessingError(
@@ -156,16 +151,11 @@ class CellTrackingWidget(BaseAnalysisWidget):
                     f"Error formatting input data: {str(e)}"
                 )
 
-            # Log current parameters
-            logger.debug(f"Tracking parameters: {vars(self.tracking_params)}")
-
             # Run tracking
-            self._update_status("Analyzing cell movements...", 40)
             try:
                 tracked_labels = self.tracker.track_cells(stack)
                 if tracked_labels is None:
                     raise ProcessingError("Tracking produced no results")
-                logger.debug("Cell tracking completed successfully")
             except Exception as e:
                 logger.error(f"Tracking algorithm failed: {str(e)}", exc_info=True)
                 raise ProcessingError(
@@ -173,39 +163,16 @@ class CellTrackingWidget(BaseAnalysisWidget):
                     f"Error during cell tracking: {str(e)}"
                 )
 
-            # Store results
-            try:
-                self._update_status("Storing results...", 80)
-                self.data_manager.tracked_data = tracked_labels
-                logger.debug("Tracking results stored in data_manager")
-            except Exception as e:
-                logger.error(f"Failed to store results: {str(e)}", exc_info=True)
-                raise ProcessingError(
-                    "Failed to store results",
-                    f"Error storing tracking results: {str(e)}"
-                )
-
-            # Update visualization
-            try:
-                self._update_status("Updating visualization...", 90)
-                self.visualization_manager.update_tracking_visualization(tracked_labels)
-                logger.debug("Visualization updated successfully")
-            except Exception as e:
-                logger.error(f"Visualization update failed: {str(e)}", exc_info=True)
-                raise ProcessingError(
-                    "Visualization failed",
-                    f"Error updating tracking visualization: {str(e)}"
-                )
+            # Store and visualize results
+            self.data_manager.tracked_data = tracked_labels
+            self.visualization_manager.update_tracking_visualization(tracked_labels)
 
             self._update_status("Cell tracking complete", 100)
-            # Emit only the base class signal with results
             self.processing_completed.emit(tracked_labels)
             logger.debug("Cell tracking workflow completed successfully")
 
         except ProcessingError as e:
             logger.error(f"Processing error: {e.message}", exc_info=True)
-            if hasattr(e, 'details'):
-                logger.error(f"Error details: {e.details}")
             self._handle_error(e)
         except Exception as e:
             logger.error(f"Unexpected error during tracking: {str(e)}", exc_info=True)

@@ -26,12 +26,93 @@ class RegionCache:
 
 
 class CellTracker:
-    """Enhanced cell tracking with configurable parameters."""
-
     def __init__(self, config: 'AnalysisConfig'):
         self.config = config
         self.params = TrackingParameters()
         self._region_cache = {}
+        self._progress_callback = None
+
+    def set_progress_callback(self, callback):
+        """Set callback function for progress updates"""
+        self._progress_callback = callback
+
+    def _update_progress(self, progress: float, message: str = ""):
+        """Update progress through callback if available"""
+        if self._progress_callback:
+            self._progress_callback(progress, message)
+
+    def track_cells(self, segmentation_stack: np.ndarray) -> np.ndarray:
+        """Track cells across frames using current parameters."""
+        if len(segmentation_stack.shape) != 3:
+            raise ValueError("Expected 3D stack (t, x, y)")
+
+        total_frames = len(segmentation_stack)
+        tracked_segmentation = np.zeros_like(segmentation_stack)
+        all_used_ids: Set[int] = set()
+
+        self._update_progress(0, "Initializing tracking...")
+
+        # Filter small cells
+        if self.params.min_cell_size > 0:
+            self._update_progress(5, "Filtering small cells...")
+            mask = np.zeros_like(segmentation_stack, dtype=bool)
+            for t in range(total_frames):
+                regions = self._cache_regions(segmentation_stack[t], t)
+                for region in regions:
+                    if region.area >= self.params.min_cell_size:
+                        mask[t][region.coords[:, 0], region.coords[:, 1]] = True
+                self._update_progress(5 + (15 * t / total_frames), "Filtering small cells...")
+            segmentation_stack = segmentation_stack * mask
+
+        # Process first frame
+        self._update_progress(20, "Processing first frame...")
+        first_frame = segmentation_stack[0]
+        regions = self._cache_regions(first_frame, 0)
+        sorted_regions = sorted(regions, key=lambda r: np.linalg.norm(r.centroid))
+        id_mapping = {region.label: idx for idx, region in enumerate(sorted_regions, start=1)}
+        tracked_segmentation[0] = np.zeros_like(first_frame)
+        for old_id, new_id in id_mapping.items():
+            tracked_segmentation[0][first_frame == old_id] = new_id
+            all_used_ids.add(new_id)
+
+        # Process subsequent frames
+        for t in range(total_frames - 1):
+            progress = 20 + (70 * t / (total_frames - 1))
+            self._update_progress(progress, f"Tracking frame {t + 1}/{total_frames - 1}...")
+
+            current_frame = tracked_segmentation[t]
+            next_frame = segmentation_stack[t + 1]
+
+            overlap_matrix = self._calculate_overlap_matrix(
+                current_frame,
+                next_frame,
+                t,
+                t + 1,
+                max_displacement=self.params.max_displacement,
+                min_overlap_ratio=self.params.min_overlap_ratio
+            )
+
+            tracked_segmentation[t + 1] = np.zeros_like(next_frame)
+            assigned_ids: Set[int] = set()
+
+            if self.params.enable_gap_closing and t >= self.params.max_frame_gap:
+                self._handle_gap_closing_optimized(
+                    tracked_segmentation,
+                    t,
+                    overlap_matrix,
+                    assigned_ids
+                )
+
+            self._process_frame_regions_optimized(
+                next_frame,
+                tracked_segmentation[t + 1],
+                overlap_matrix,
+                assigned_ids,
+                all_used_ids
+            )
+
+        self._update_progress(100, "Tracking complete")
+        return tracked_segmentation
 
     def update_parameters(self, new_params: TrackingParameters):
         """Update tracking parameters"""
@@ -56,74 +137,6 @@ class CellTracker:
 
         self._region_cache[cache_key] = regions
         return regions
-
-    def track_cells(self, segmentation_stack: np.ndarray) -> np.ndarray:
-        """Track cells across frames using current parameters."""
-        if len(segmentation_stack.shape) != 3:
-            raise ValueError("Expected 3D stack (t, x, y)")
-
-        tracked_segmentation = np.zeros_like(segmentation_stack)
-        all_used_ids: Set[int] = set()
-
-        # Filter small cells only if min_cell_size > 0
-        if self.params.min_cell_size > 0:
-            mask = np.zeros_like(segmentation_stack, dtype=bool)
-            for t in range(len(segmentation_stack)):
-                regions = self._cache_regions(segmentation_stack[t], t)
-                for region in regions:
-                    if region.area >= self.params.min_cell_size:
-                        mask[t][region.coords[:, 0], region.coords[:, 1]] = True
-            segmentation_stack = segmentation_stack * mask
-
-        # Process first frame - avoid unnecessary unique operations
-        first_frame = segmentation_stack[0]
-        regions = self._cache_regions(first_frame, 0)
-        sorted_regions = sorted(regions, key=lambda r: np.linalg.norm(r.centroid))
-
-        # Use direct label mapping instead of unique
-        id_mapping = {region.label: idx for idx, region in enumerate(sorted_regions, start=1)}
-
-        # Vectorized relabeling of first frame
-        tracked_segmentation[0] = np.zeros_like(first_frame)
-        for old_id, new_id in id_mapping.items():
-            tracked_segmentation[0][first_frame == old_id] = new_id
-            all_used_ids.add(new_id)
-
-        # Process subsequent frames
-        for t in range(len(segmentation_stack) - 1):
-            current_frame = tracked_segmentation[t]
-            next_frame = segmentation_stack[t + 1]
-
-            overlap_matrix = self._calculate_overlap_matrix(
-                current_frame,
-                next_frame,
-                t,
-                t + 1,
-                max_displacement=self.params.max_displacement,
-                min_overlap_ratio=self.params.min_overlap_ratio
-            )
-
-            tracked_segmentation[t + 1] = np.zeros_like(next_frame)
-            assigned_ids: Set[int] = set()
-
-            if self.params.enable_gap_closing and t >= self.params.max_frame_gap:
-                self._handle_gap_closing_optimized(
-                    tracked_segmentation,
-                    t,
-                    overlap_matrix,
-                    assigned_ids
-                )
-
-            # Use optimized frame processing
-            self._process_frame_regions_optimized(
-                next_frame,
-                tracked_segmentation[t + 1],
-                overlap_matrix,
-                assigned_ids,
-                all_used_ids
-            )
-
-        return tracked_segmentation
 
     def _process_frame_regions_optimized(
             self,
