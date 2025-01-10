@@ -46,19 +46,10 @@ class CellTracker:
         if len(segmentation_stack.shape) != 3:
             raise ValueError("Expected 3D stack (t, x, y)")
 
-        # Fix duplicate logging
-        root_logger = logging.getLogger()
-        if root_logger.handlers:
-            root_logger.handlers = [root_logger.handlers[0]]
-
         total_frames = len(segmentation_stack)
         tracked_segmentation = np.zeros_like(segmentation_stack)
         all_used_ids: Set[int] = set()
         future_assignments = {}
-
-        logger.debug("=== Starting tracking process ===")
-        logger.debug(f"Input stack shape: {segmentation_stack.shape}")
-        logger.debug(f"Input first frame unique IDs: {set(np.unique(segmentation_stack[0])) - {0} }")
 
         self._update_progress(0, "Initializing tracking...")
 
@@ -78,22 +69,14 @@ class CellTracker:
         self._update_progress(20, "Processing first frame...")
         first_frame = segmentation_stack[0]
         regions = self._cache_regions(first_frame, 0)
-        logger.debug(f"Number of regions found in first frame: {len(regions)}")
-        logger.debug(f"Region labels: {[r.label for r in regions]}")
 
         sorted_regions = sorted(regions, key=lambda r: np.linalg.norm(r.centroid))
-        logger.debug(f"Regions after sorting: {[r.label for r in sorted_regions]}")
-
         id_mapping = {region.label: idx for idx, region in enumerate(sorted_regions, start=1)}
-        logger.debug(f"ID mapping for first frame: {id_mapping}")
 
         tracked_segmentation[0] = np.zeros_like(first_frame)
         for old_id, new_id in id_mapping.items():
             tracked_segmentation[0][first_frame == old_id] = new_id
             all_used_ids.add(new_id)
-            logger.debug(f"Mapped ID {old_id} -> {new_id}")
-
-        logger.debug(f"Unique IDs in tracked first frame: {set(np.unique(tracked_segmentation[0])) - {0} }")
 
         # Process subsequent frames
         for t in range(total_frames - 1):
@@ -103,6 +86,33 @@ class CellTracker:
             current_frame = tracked_segmentation[t]
             next_frame = segmentation_stack[t + 1]
 
+            # Initialize next frame
+            tracked_segmentation[t + 1] = np.zeros_like(next_frame)
+            assigned_ids: Set[int] = set()
+
+            # Handle gap closing if enabled
+            if self.params.enable_gap_closing and t >= 1:  # Changed condition to t >= 1
+                logger.debug(f"Running gap closing for frame {t}")
+                gap_assignments = self._handle_gap_closing(
+                    tracked_segmentation=tracked_segmentation,
+                    current_frame=t,
+                    overlap_matrix={},  # Empty since we haven't calculated it yet
+                    assigned_ids=assigned_ids,
+                    segmentation_stack=segmentation_stack
+                )
+
+                # Apply gap assignments BEFORE calculating new overlaps
+                for frame_idx, assignments in gap_assignments.items():
+                    if frame_idx == t + 1:  # Only apply immediate assignments
+                        for cell_id, (next_id, mask) in assignments.items():
+                            tracked_segmentation[t + 1][mask] = cell_id  # Use original cell_id
+                            assigned_ids.add(next_id)  # Mark the segmentation ID as assigned
+                    else:
+                        if frame_idx not in future_assignments:
+                            future_assignments[frame_idx] = {}
+                        future_assignments[frame_idx].update(assignments)
+
+            # Calculate overlaps for remaining unassigned cells
             overlap_matrix = self._calculate_overlap_matrix(
                 current_frame,
                 next_frame,
@@ -112,28 +122,7 @@ class CellTracker:
                 min_overlap_ratio=self.params.min_overlap_ratio
             )
 
-            tracked_segmentation[t + 1] = np.zeros_like(next_frame)
-            assigned_ids: Set[int] = set()
-
-            # Handle gap closing if enabled
-            if self.params.enable_gap_closing and t >= self.params.max_frame_gap:
-                logger.debug(f"Running gap closing for frame {t}")
-                gap_assignments = self._handle_gap_closing(
-                    tracked_segmentation=tracked_segmentation,
-                    current_frame=t,
-                    overlap_matrix=overlap_matrix,
-                    assigned_ids=assigned_ids,
-                    segmentation_stack=segmentation_stack
-                )
-
-                # Merge new assignments with existing future assignments
-                for frame_idx, assignments in gap_assignments.items():
-                    if frame_idx not in future_assignments:
-                        future_assignments[frame_idx] = {}
-                    future_assignments[frame_idx].update(assignments)
-                    logger.debug(f"Added assignments for frame {frame_idx}: {assignments.keys()}")
-
-            # Process normal tracking for next frame
+            # Process remaining unassigned regions
             self._process_frame_regions_optimized(
                 next_frame,
                 tracked_segmentation[t + 1],
@@ -142,23 +131,16 @@ class CellTracker:
                 all_used_ids
             )
 
-            # Apply any assignments for this frame
+            # Apply any future assignments for this frame
             if t + 1 in future_assignments:
                 logger.debug(f"Applying stored assignments for frame {t + 1}")
                 frame_assignments = future_assignments[t + 1]
                 for cell_id, (next_id, mask) in frame_assignments.items():
-                    logger.debug(f"Applying assignment: cell {cell_id} -> {next_id}")
                     tracked_segmentation[t + 1][mask] = cell_id
-                    logger.debug(f"After applying assignment, unique IDs in frame {t + 1}: "
-                                 f"{set(np.unique(tracked_segmentation[t + 1])) - {0} }")
                 del future_assignments[t + 1]
-
-            logger.debug(f"Completed processing frame {t + 1}")
-            logger.debug(f"Unique IDs in frame {t + 1}: {set(np.unique(tracked_segmentation[t + 1])) - {0} }")
 
         self._update_progress(100, "Tracking complete")
         return tracked_segmentation
-
     def _handle_gap_closing(
             self,
             tracked_segmentation: np.ndarray,
