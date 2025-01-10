@@ -75,14 +75,12 @@ class CellTracker:
                         mask[t][region.coords[:, 0], region.coords[:, 1]] = True
             segmentation_stack = segmentation_stack * mask
 
-        # Process first frame
+        # Process first frame - avoid unnecessary unique operations
         first_frame = segmentation_stack[0]
         regions = self._cache_regions(first_frame, 0)
         sorted_regions = sorted(regions, key=lambda r: np.linalg.norm(r.centroid))
 
-        # Initialize with sequential IDs using vectorized operations
-        labels = np.unique(first_frame)
-        labels = labels[labels > 0]
+        # Use direct label mapping instead of unique
         id_mapping = {region.label: idx for idx, region in enumerate(sorted_regions, start=1)}
 
         # Vectorized relabeling of first frame
@@ -116,7 +114,8 @@ class CellTracker:
                     assigned_ids
                 )
 
-            self._process_frame_regions(
+            # Use optimized frame processing
+            self._process_frame_regions_optimized(
                 next_frame,
                 tracked_segmentation[t + 1],
                 overlap_matrix,
@@ -125,6 +124,44 @@ class CellTracker:
             )
 
         return tracked_segmentation
+
+    def _process_frame_regions_optimized(
+            self,
+            current_frame: np.ndarray,
+            output_frame: np.ndarray,
+            overlap_matrix: Dict[int, List[Tuple[int, int, float]]],
+            assigned_ids: Set[int],
+            all_used_ids: Set[int]
+    ) -> None:
+        """Optimized region processing avoiding expensive unique operations"""
+        # Process matched cells first
+        for current_id, candidates in overlap_matrix.items():
+            for next_id, _, score in candidates:
+                if next_id not in assigned_ids:
+                    output_frame[current_frame == next_id] = current_id
+                    assigned_ids.add(next_id)
+                    break
+
+        # Find unmatched cells more efficiently
+        current_labels = set()
+        # Use a small buffer to process the array in chunks
+        chunk_size = 1000000  # Adjust based on available memory
+        flat_frame = current_frame.ravel()
+        for i in range(0, len(flat_frame), chunk_size):
+            chunk = flat_frame[i:i + chunk_size]
+            current_labels.update(np.unique(chunk[chunk > 0]))
+
+        unmatched_labels = current_labels - assigned_ids
+
+        if unmatched_labels:
+            start_id = max(all_used_ids) + 1 if all_used_ids else 1
+            new_ids = range(start_id, start_id + len(unmatched_labels))
+
+            for new_id, label in zip(new_ids, unmatched_labels):
+                output_frame[current_frame == label] = new_id
+                all_used_ids.add(new_id)
+                assigned_ids.add(label)
+
 
     def _calculate_overlap_matrix(
             self,
