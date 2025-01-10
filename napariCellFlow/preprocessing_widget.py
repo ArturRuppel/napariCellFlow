@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
 
+import napari
 import numpy as np
 from napari.utils.events import Event
 from qtpy.QtCore import Signal, Qt
@@ -54,9 +55,108 @@ class PreprocessingWidget(BaseAnalysisWidget):
         self._setup_ui()
         self._connect_signals()
 
-        # Add layer removal event handler
-        self.viewer.layers.events.removed.connect(self._handle_layer_removal)
+        # Add layer events handlers
+        self.viewer.layers.events.removed.connect(self._update_ui_state)
+        self.viewer.layers.events.inserted.connect(self._update_ui_state)
+        self.viewer.layers.selection.events.changed.connect(self._update_ui_state)
 
+        # Initial UI state update
+        self._update_ui_state()
+
+    def _update_ui_state(self, event=None):
+        """Update UI based on current state"""
+        active_layer = self._get_active_image_layer()
+        has_valid_image = (active_layer is not None and
+                           isinstance(active_layer, napari.layers.Image) and
+                           active_layer.data.ndim in [2, 3])
+
+        # Update button states
+        self.preprocess_btn.setEnabled(has_valid_image)
+        self.preview_check.setEnabled(has_valid_image)
+
+        # Disable preview if the original layer is gone or no longer selected
+        if self.preview_enabled and self.original_layer is not None:
+            if self.original_layer not in self.viewer.layers:
+                self.preview_check.setChecked(False)
+                self.preview_enabled = False
+                if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
+                    self.viewer.layers.remove(self.preview_layer)
+                self.preview_layer = None
+                self.original_layer = None
+
+    def toggle_preview(self, enabled: bool):
+        """Toggle preview mode"""
+        self.preview_enabled = enabled
+
+        try:
+            if enabled:
+                if self.original_layer is None:
+                    self.original_layer = self._get_active_image_layer()
+                    if self.original_layer is None:
+                        raise ProcessingError("No image layer found")
+
+                if self.preview_layer is None:
+                    preview_data = (self.original_layer.data[0] if self.original_layer.data.ndim == 3
+                                    else self.original_layer.data)
+                    # Store current selection before adding preview
+                    current_selected = list(self.viewer.layers.selection)
+
+                    self.preview_layer = self.viewer.add_image(
+                        np.zeros_like(preview_data),
+                        name='Preview',
+                        visible=True
+                    )
+
+                    # Restore original selection
+                    self.viewer.layers.selection.clear()
+                    for layer in current_selected:
+                        self.viewer.layers.selection.add(layer)
+
+                self.update_preview_frame()
+            else:
+                if self.preview_layer is not None:
+                    # Store current selection before removing preview
+                    current_selected = list(self.viewer.layers.selection)
+
+                    self.viewer.layers.remove(self.preview_layer)
+
+                    # Restore original selection, excluding the preview layer
+                    self.viewer.layers.selection.clear()
+                    for layer in current_selected:
+                        if layer != self.preview_layer:
+                            self.viewer.layers.selection.add(layer)
+
+                    self.preview_layer = None
+
+        except Exception as e:
+            self.preview_check.setChecked(False)
+            self.preview_enabled = False
+            if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
+                self.viewer.layers.remove(self.preview_layer)
+            self.preview_layer = None
+            raise ProcessingError("Preview failed", str(e))
+
+    def _handle_layer_removal(self, event):
+        """Handle layer removal events"""
+        removed_layer = event.value
+
+        if removed_layer == self.preview_layer:
+            logger.debug("Preview layer was removed")
+            self.preview_layer = None
+            self.preview_enabled = False
+            self.preview_check.setChecked(False)
+
+        if removed_layer == self.original_layer:
+            logger.debug("Original layer was removed")
+            self.original_layer = None
+            if self.preview_layer is not None:
+                self.viewer.layers.remove(self.preview_layer)
+                self.preview_layer = None
+            self.preview_enabled = False
+            self.preview_check.setChecked(False)
+
+        # Update UI state
+        self._update_ui_state()
     def _initialize_controls(self):
         """Initialize all UI controls"""
         # Intensity controls
@@ -322,76 +422,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
         if self.viewer is not None:
             self.viewer.dims.events.current_step.connect(self.update_preview_frame)
 
-    def _handle_layer_removal(self, event):
-        """Handle layer removal events"""
-        removed_layer = event.value
-
-        if removed_layer == self.preview_layer:
-            logger.debug("Preview layer was removed")
-            self.preview_layer = None
-            self.preview_enabled = False
-            self.preview_check.setChecked(False)
-
-        if removed_layer == self.original_layer:
-            logger.debug("Original layer was removed")
-            self.original_layer = None
-            if self.preview_layer is not None:
-                self.viewer.layers.remove(self.preview_layer)
-                self.preview_layer = None
-            self.preview_enabled = False
-            self.preview_check.setChecked(False)
-
-    def toggle_preview(self, enabled: bool):
-        """Toggle preview mode"""
-        self.preview_enabled = enabled
-
-        try:
-            if enabled:
-                if self.original_layer is None:
-                    self.original_layer = self._get_active_image_layer()
-                    if self.original_layer is None:
-                        raise ProcessingError("No image layer found")
-
-                if self.preview_layer is None:
-                    preview_data = (self.original_layer.data[0] if self.original_layer.data.ndim == 3
-                                    else self.original_layer.data)
-                    # Store current selection before adding preview
-                    current_selected = list(self.viewer.layers.selection)
-
-                    self.preview_layer = self.viewer.add_image(
-                        np.zeros_like(preview_data),
-                        name='Preview',
-                        visible=True
-                    )
-
-                    # Restore original selection
-                    self.viewer.layers.selection.clear()
-                    for layer in current_selected:
-                        self.viewer.layers.selection.add(layer)
-
-                self.update_preview_frame()
-            else:
-                if self.preview_layer is not None:
-                    # Store current selection before removing preview
-                    current_selected = list(self.viewer.layers.selection)
-
-                    self.viewer.layers.remove(self.preview_layer)
-
-                    # Restore original selection, excluding the preview layer
-                    self.viewer.layers.selection.clear()
-                    for layer in current_selected:
-                        if layer != self.preview_layer:
-                            self.viewer.layers.selection.add(layer)
-
-                    self.preview_layer = None
-
-        except Exception as e:
-            self.preview_check.setChecked(False)
-            self.preview_enabled = False
-            if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
-                self.viewer.layers.remove(self.preview_layer)
-            self.preview_layer = None
-            raise ProcessingError("Preview failed", str(e))
 
     def update_preview_frame(self, event: Optional[Event] = None):
         """Update the preview for the current frame"""
