@@ -1,11 +1,14 @@
 import logging
+import numpy as np
+from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (
-    QFormLayout, QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton, QHBoxLayout
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QSizePolicy, QProgressBar, QLabel,
+    QFormLayout, QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton
 )
 
-from napari_cellpose_stackmode.base_widget import BaseAnalysisWidget, ProcessingError
-from napari_cellpose_stackmode.cell_tracking import CellTracker
-from napari_cellpose_stackmode.structure import AnalysisConfig, TrackingParameters
+from .base_widget_new import BaseAnalysisWidget, ProcessingError
+from .cell_tracking import CellTracker
+from .structure import AnalysisConfig, TrackingParameters
 
 logger = logging.getLogger(__name__)
 
@@ -13,95 +16,112 @@ logger = logging.getLogger(__name__)
 class CellTrackingWidget(BaseAnalysisWidget):
     """Widget for cell tracking operations with interactive parameters."""
 
+    tracking_completed = Signal(object)  # Tracked data signal
+
     def __init__(
             self,
             viewer: "napari.Viewer",
             data_manager: "DataManager",
             visualization_manager: "VisualizationManager"
     ):
-        super().__init__(viewer, data_manager, visualization_manager, "Cell Tracking")
+        super().__init__(
+            viewer=viewer,
+            data_manager=data_manager,
+            visualization_manager=visualization_manager
+        )
+
+        # Initialize tracker and parameters
         self.tracking_params = TrackingParameters()
         self.tracker = CellTracker(AnalysisConfig())
+
+        # Initialize controls
+        self._initialize_controls()
+
+        # Setup UI and connect signals
         self._setup_ui()
         self._connect_signals()
 
-    def _setup_ui(self):
-        """Initialize the tracking-specific UI elements"""
-        # Parameters section
-        param_layout = QFormLayout()
+        logger.debug("CellTrackingWidget initialized")
 
-        # Create parameter controls
+    def _initialize_controls(self):
+        """Initialize all UI controls"""
+        # Overlap controls
         self.overlap_spin = QDoubleSpinBox()
         self.overlap_spin.setRange(0.0, 1.0)
         self.overlap_spin.setSingleStep(0.1)
         self.overlap_spin.setValue(self.tracking_params.min_overlap_ratio)
         self.overlap_spin.setToolTip("Minimum overlap ratio between frames for cell identity assignment (0-1)")
-        self.register_control(self.overlap_spin)
-        param_layout.addRow("Min Overlap Ratio:", self.overlap_spin)
 
+        # Displacement controls
         self.displacement_spin = QDoubleSpinBox()
         self.displacement_spin.setRange(0.0, float('inf'))
         self.displacement_spin.setMaximum(1e9)
         self.displacement_spin.setSingleStep(5.0)
         self.displacement_spin.setValue(self.tracking_params.max_displacement)
         self.displacement_spin.setToolTip("Maximum allowed cell movement between frames (pixels)")
-        self.register_control(self.displacement_spin)
-        param_layout.addRow("Max Displacement:", self.displacement_spin)
 
+        # Cell size controls
         self.cell_size_spin = QSpinBox()
         self.cell_size_spin.setRange(0, int(1e9))
         self.cell_size_spin.setSingleStep(10)
         self.cell_size_spin.setValue(self.tracking_params.min_cell_size)
         self.cell_size_spin.setToolTip("Minimum cell size in pixels (0 to disable filtering)")
-        self.register_control(self.cell_size_spin)
-        param_layout.addRow("Min Cell Size:", self.cell_size_spin)
 
+        # Gap closing controls
         self.gap_closing_check = QCheckBox()
         self.gap_closing_check.setChecked(self.tracking_params.enable_gap_closing)
         self.gap_closing_check.setToolTip("Enable tracking across gaps in segmentation")
-        self.register_control(self.gap_closing_check)
-        param_layout.addRow("Enable Gap Closing:", self.gap_closing_check)
 
         self.gap_frames_spin = QSpinBox()
         self.gap_frames_spin.setRange(1, int(1e4))
         self.gap_frames_spin.setSingleStep(1)
         self.gap_frames_spin.setValue(self.tracking_params.max_frame_gap)
         self.gap_frames_spin.setToolTip("Maximum number of frames to look ahead for gap closing")
-        self.register_control(self.gap_frames_spin)
-        param_layout.addRow("Max Frame Gap:", self.gap_frames_spin)
+        self.gap_frames_spin.setEnabled(self.gap_closing_check.isChecked())
 
-        # Add parameter layout to main layout
-        self.main_layout.insertLayout(1, param_layout)  # Insert after title
-
-        # Add button layout
-        button_layout = QHBoxLayout()
-
-        # Track cells button
+        # Action buttons
         self.track_btn = QPushButton("Track Cells")
-        self.track_btn.clicked.connect(self.run_analysis)
-        self.register_control(self.track_btn)
-        button_layout.addWidget(self.track_btn)
-
-        # Reset parameters button
         self.reset_btn = QPushButton("Reset Parameters")
-        self.reset_btn.clicked.connect(self.reset_parameters)
-        self.register_control(self.reset_btn)
-        button_layout.addWidget(self.reset_btn)
 
-        # Add button layout after parameters but before the stretch
-        self.main_layout.insertLayout(2, button_layout)
+        logger.debug("Controls initialized with default parameters")
 
-    def _connect_signals(self):
-        """Connect parameter control signals"""
-        self.overlap_spin.valueChanged.connect(self.update_parameters)
-        self.displacement_spin.valueChanged.connect(self.update_parameters)
-        self.cell_size_spin.valueChanged.connect(self.update_parameters)
-        self.gap_closing_check.stateChanged.connect(self.update_parameters)
-        self.gap_frames_spin.valueChanged.connect(self.update_parameters)
+    def _validate_stack(self, stack: np.ndarray) -> None:
+        """Validate the input stack thoroughly"""
+        if stack is None:
+            raise ProcessingError("Input stack is None")
+
+        if not isinstance(stack, np.ndarray):
+            raise ProcessingError(
+                f"Invalid input type: expected numpy array, got {type(stack)}"
+            )
+
+        if stack.ndim not in [2, 3]:
+            raise ProcessingError(
+                f"Invalid dimensions: expected 2D or 3D array, got {stack.ndim}D"
+            )
+
+        if stack.size == 0:
+            raise ProcessingError("Empty input array")
+
+        if not np.issubdtype(stack.dtype, np.integer):
+            raise ProcessingError(
+                f"Invalid data type: expected integer labels, got {stack.dtype}"
+            )
+
+        if np.any(stack < 0):
+            raise ProcessingError("Negative values found in labels")
+
+        logger.debug(f"Stack validation passed: shape={stack.shape}, dtype={stack.dtype}")
 
     def run_analysis(self):
         """Run cell tracking with current parameters"""
         try:
+            logger.debug("Starting cell tracking analysis")
+
+            # Emit processing started signal
+            self.processing_started.emit()
+
+            # Get active layer
             active_layer = self._get_active_labels_layer()
             if active_layer is None:
                 raise ProcessingError(
@@ -109,101 +129,233 @@ class CellTrackingWidget(BaseAnalysisWidget):
                     "Please select a layer containing cell segmentation"
                 )
 
+            logger.debug(f"Active layer found: {active_layer.name}")
+
+            # Get and validate the stack
             stack = active_layer.data
-            if not self._validate_input_data(stack):
+            if stack is None:
+                raise ProcessingError("Empty layer data")
+
+            logger.debug(f"Retrieved stack: shape={stack.shape}, dtype={stack.dtype}")
+
+            # Thorough validation
+            self._validate_stack(stack)
+
+            # Disable controls during processing
+            self._set_controls_enabled(False)
+            self._update_status("Starting cell tracking...", 0)
+
+            # Ensure proper data format
+            try:
+                stack = self._ensure_stack_format(stack)
+                logger.debug(f"Stack formatted: shape={stack.shape}")
+            except Exception as e:
+                logger.error(f"Failed to format stack: {str(e)}", exc_info=True)
                 raise ProcessingError(
-                    "Invalid input data",
-                    "Data must be a 2D or 3D numpy array"
+                    "Data formatting failed",
+                    f"Error formatting input data: {str(e)}"
                 )
 
-            self._processing = True
-            self._set_controls_enabled(False)
+            # Log current parameters
+            logger.debug(f"Tracking parameters: {vars(self.tracking_params)}")
 
-            # More granular progress updates
-            self._update_status("Preparing image stack...", 10)
-            stack = self._ensure_stack_format(stack)
-
-            self._update_status("Initializing cell tracker...", 20)
+            # Run tracking
             self._update_status("Analyzing cell movements...", 40)
-            tracked_labels = self.tracker.track_cells(stack)
+            try:
+                tracked_labels = self.tracker.track_cells(stack)
+                if tracked_labels is None:
+                    raise ProcessingError("Tracking produced no results")
+                logger.debug("Cell tracking completed successfully")
+            except Exception as e:
+                logger.error(f"Tracking algorithm failed: {str(e)}", exc_info=True)
+                raise ProcessingError(
+                    "Tracking algorithm failed",
+                    f"Error during cell tracking: {str(e)}"
+                )
 
-            self._update_status("Storing results...", 80)
-            self.data_manager.tracked_data = tracked_labels
+            # Store results
+            try:
+                self._update_status("Storing results...", 80)
+                self.data_manager.tracked_data = tracked_labels
+                logger.debug("Tracking results stored in data_manager")
+            except Exception as e:
+                logger.error(f"Failed to store results: {str(e)}", exc_info=True)
+                raise ProcessingError(
+                    "Failed to store results",
+                    f"Error storing tracking results: {str(e)}"
+                )
 
-            self._update_status("Updating visualization...", 90)
-            self.vis_manager.update_tracking_visualization(tracked_labels)
+            # Update visualization
+            try:
+                self._update_status("Updating visualization...", 90)
+                self.visualization_manager.update_tracking_visualization(tracked_labels)
+                logger.debug("Visualization updated successfully")
+            except Exception as e:
+                logger.error(f"Visualization update failed: {str(e)}", exc_info=True)
+                raise ProcessingError(
+                    "Visualization failed",
+                    f"Error updating tracking visualization: {str(e)}"
+                )
 
             self._update_status("Cell tracking complete", 100)
-            # Emit both sets of signals consistently
+            # Emit only the base class signal with results
             self.processing_completed.emit(tracked_labels)
+            logger.debug("Cell tracking workflow completed successfully")
 
         except ProcessingError as e:
+            logger.error(f"Processing error: {e.message}", exc_info=True)
+            if hasattr(e, 'details'):
+                logger.error(f"Error details: {e.details}")
             self._handle_error(e)
         except Exception as e:
+            logger.error(f"Unexpected error during tracking: {str(e)}", exc_info=True)
             error = ProcessingError(
-                message="Cell tracking failed",
-                details=str(e),
-                component=self.__class__.__name__
+                "Cell tracking failed",
+                f"Unexpected error: {str(e)}",
+                self.__class__.__name__
             )
             self._handle_error(error)
         finally:
-            self._processing = False
             self._set_controls_enabled(True)
+            logger.debug("Controls re-enabled")
+    def _create_parameter_group(self) -> QGroupBox:
+        """Create tracking parameters group"""
+        group = QGroupBox("Tracking Parameters")
+        layout = QFormLayout()
+        layout.setSpacing(4)
+
+        # Add parameter controls
+        layout.addRow("Min Overlap Ratio:", self.overlap_spin)
+        layout.addRow("Max Displacement:", self.displacement_spin)
+        layout.addRow("Min Cell Size:", self.cell_size_spin)
+
+        # Gap closing section
+        gap_layout = QHBoxLayout()
+        gap_layout.addWidget(self.gap_closing_check)
+        gap_layout.addWidget(self.gap_frames_spin)
+        gap_layout.addStretch()
+        layout.addRow("Enable Gap Closing:", gap_layout)
+
+        group_widget = QWidget()
+        group_widget.setLayout(layout)
+
+        group_layout = QVBoxLayout()
+        group_layout.addWidget(group_widget)
+        group.setLayout(group_layout)
+
+        return group
+
+    def _create_action_group(self) -> QGroupBox:
+        """Create action buttons group"""
+        group = QGroupBox("Actions")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+        layout.addWidget(self.track_btn)
+        layout.addWidget(self.reset_btn)
+        group.setLayout(layout)
+        return group
+
+    def _setup_ui(self):
+        """Initialize the user interface"""
+        # Create right side container
+        right_container = QWidget()
+        right_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        right_container.setFixedWidth(350)
+
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(8)
+        right_layout.setContentsMargins(6, 6, 6, 6)
+
+        # Create and add groups
+        right_layout.addWidget(self._create_parameter_group())
+        right_layout.addWidget(self._create_action_group())
+
+        # Add status section
+        status_layout = QVBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        status_layout.addWidget(self.progress_bar)
+        status_layout.addWidget(self.status_label)
+        right_layout.addLayout(status_layout)
+
+        right_layout.addStretch()
+        right_container.setLayout(right_layout)
+
+        # Add to the main layout
+        self.main_layout.addWidget(right_container)
+        self.main_layout.addStretch(1)
+
+        # Register controls
+        self._register_controls()
+
+    def _register_controls(self):
+        """Register all controls with base widget"""
+        controls = [
+            self.overlap_spin,
+            self.displacement_spin,
+            self.cell_size_spin,
+            self.gap_closing_check,
+            self.gap_frames_spin,
+            self.track_btn,
+            self.reset_btn
+        ]
+
+        for control in controls:
+            self.register_control(control)
+
+        # Connect gap frames spin enabled state to checkbox
+        self.gap_closing_check.toggled.connect(self.gap_frames_spin.setEnabled)
+
+    def _connect_signals(self):
+        """Connect widget signals"""
+        self.track_btn.clicked.connect(self.run_analysis)
+        self.reset_btn.clicked.connect(self.reset_parameters)
+
+        # Parameter update signals
+        self.overlap_spin.valueChanged.connect(self.update_parameters)
+        self.displacement_spin.valueChanged.connect(self.update_parameters)
+        self.cell_size_spin.valueChanged.connect(self.update_parameters)
+        self.gap_closing_check.toggled.connect(self.update_parameters)
+        self.gap_frames_spin.valueChanged.connect(self.update_parameters)
 
     def update_parameters(self):
         """Update tracking parameters from UI controls"""
         try:
-            self.tracking_params.min_overlap_ratio = self.overlap_spin.value()
-            self.tracking_params.max_displacement = self.displacement_spin.value()
-            self.tracking_params.min_cell_size = self.cell_size_spin.value()
-            self.tracking_params.enable_gap_closing = self.gap_closing_check.isChecked()
-            self.tracking_params.max_frame_gap = self.gap_frames_spin.value()
+            self.tracking_params = TrackingParameters(
+                min_overlap_ratio=self.overlap_spin.value(),
+                max_displacement=self.displacement_spin.value(),
+                min_cell_size=self.cell_size_spin.value(),
+                enable_gap_closing=self.gap_closing_check.isChecked(),
+                max_frame_gap=self.gap_frames_spin.value()
+            )
 
             self.tracking_params.validate()
             self.tracker.update_parameters(self.tracking_params)
+
             self._update_status("Parameters updated")
             self.parameters_updated.emit()
 
         except ValueError as e:
-            self._update_status(f"Invalid parameters: {str(e)}")
-            logger.warning(f"Invalid parameter combination: {str(e)}")
+            raise ProcessingError("Invalid parameters", str(e))
 
     def reset_parameters(self):
         """Reset all parameters to defaults"""
         self.tracking_params = TrackingParameters()
+
         self.overlap_spin.setValue(self.tracking_params.min_overlap_ratio)
         self.displacement_spin.setValue(self.tracking_params.max_displacement)
         self.cell_size_spin.setValue(self.tracking_params.min_cell_size)
         self.gap_closing_check.setChecked(self.tracking_params.enable_gap_closing)
         self.gap_frames_spin.setValue(self.tracking_params.max_frame_gap)
-        self._update_status("Parameters reset to defaults")
 
-    # def get_parameters(self) -> TrackingParameters:
-    #     """Get current tracking parameters"""
-    #     return TrackingParameters(
-    #         min_overlap_ratio=self.overlap_spin.value(),
-    #         max_displacement=self.displacement_spin.value(),
-    #         min_cell_size=self.cell_size_spin.value(),
-    #         enable_gap_closing=self.gap_closing_check.isChecked(),
-    #         max_frame_gap=self.gap_frames_spin.value()
-    #     )
-    #
-    # def set_parameters(self, params: TrackingParameters):
-    #     """Set tracking parameters and update UI"""
-    #     try:
-    #         params.validate()
-    #         logger.debug(f"Setting tracking parameters: {params}")
-    #
-    #         self.overlap_spin.setValue(params.min_overlap_ratio)
-    #         self.displacement_spin.setValue(params.max_displacement)
-    #         self.cell_size_spin.setValue(params.min_cell_size)
-    #         self.gap_closing_check.setChecked(params.enable_gap_closing)
-    #         self.gap_frames_spin.setValue(params.max_frame_gap)
-    #
-    #         self.tracking_params = params
-    #         self.tracker.update_parameters(params)
-    #         self.parameters_updated.emit()
-    #
-    #     except ValueError as e:
-    #         logger.error(f"Invalid parameters: {e}")
-    #         raise
+        self._update_status("Parameters reset to defaults")
+        self.update_parameters()
+
+    def cleanup(self):
+        """Clean up resources"""
+        super().cleanup()
+
+
+
+

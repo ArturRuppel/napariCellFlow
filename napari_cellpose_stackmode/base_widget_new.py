@@ -24,7 +24,7 @@ class BaseAnalysisWidget(QWidget):
     # Common signals
     parameters_updated = Signal()
     processing_started = Signal()
-    processing_completed = Signal()
+    processing_completed = Signal(object)  # Signal with result data
     processing_failed = Signal(str)  # Error message
 
     def __init__(
@@ -59,6 +59,12 @@ class BaseAnalysisWidget(QWidget):
         if active_layer is None or not isinstance(active_layer, napari.layers.Image):
             return None
         return active_layer
+
+    def _get_active_labels_layer(self) -> Optional["napari.layers.Labels"]:
+        """Get the currently active labels layer or first available labels layer."""
+        active_layer = self.viewer.layers.selection.active
+        if isinstance(active_layer, napari.layers.Labels):
+            return active_layer
 
     def _handle_error(self, error):
         """Handle processing errors."""
