@@ -355,17 +355,35 @@ class PreprocessingWidget(BaseAnalysisWidget):
                 if self.preview_layer is None:
                     preview_data = (self.original_layer.data[0] if self.original_layer.data.ndim == 3
                                     else self.original_layer.data)
+                    # Store current selection before adding preview
+                    current_selected = list(self.viewer.layers.selection)
+
                     self.preview_layer = self.viewer.add_image(
                         np.zeros_like(preview_data),
                         name='Preview',
                         visible=True
                     )
 
+                    # Restore original selection
+                    self.viewer.layers.selection.clear()
+                    for layer in current_selected:
+                        self.viewer.layers.selection.add(layer)
+
                 self.update_preview_frame()
             else:
-                if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
+                if self.preview_layer is not None:
+                    # Store current selection before removing preview
+                    current_selected = list(self.viewer.layers.selection)
+
                     self.viewer.layers.remove(self.preview_layer)
-                self.preview_layer = None
+
+                    # Restore original selection, excluding the preview layer
+                    self.viewer.layers.selection.clear()
+                    for layer in current_selected:
+                        if layer != self.preview_layer:
+                            self.viewer.layers.selection.add(layer)
+
+                    self.preview_layer = None
 
         except Exception as e:
             self.preview_check.setChecked(False)
@@ -396,13 +414,27 @@ class PreprocessingWidget(BaseAnalysisWidget):
 
             # Update preview
             if self.preview_layer is None:
+                # Store current selection before adding preview
+                current_selected = list(self.viewer.layers.selection)
+
                 self.preview_layer = self.viewer.add_image(
                     np.zeros_like(frame_8bit, dtype=np.uint8),
                     name='Preview',
                     visible=True
                 )
 
-            self.preview_layer.data = processed_frame
+                # Restore original selection
+                self.viewer.layers.selection.clear()
+                for layer in current_selected:
+                    self.viewer.layers.selection.add(layer)
+            else:
+                # Update preview data without changing selection
+                current_selected = list(self.viewer.layers.selection)
+                self.preview_layer.data = processed_frame
+                self.viewer.layers.selection.clear()
+                for layer in current_selected:
+                    self.viewer.layers.selection.add(layer)
+
             self.preview_layer.contrast_limits = (0, 255)
 
             # Update status
@@ -560,6 +592,9 @@ class PreprocessingWidget(BaseAnalysisWidget):
             # Update visualization
             self._update_status("Updating visualization...", 95)
 
+            # Store current selection
+            current_selected = list(self.viewer.layers.selection)
+
             # Remove existing preprocessed layer if it exists
             for layer in self.viewer.layers[:]:
                 if layer.name == 'Preprocessed':
@@ -575,6 +610,11 @@ class PreprocessingWidget(BaseAnalysisWidget):
 
             # Set consistent contrast limits for 8-bit
             preprocessed_layer.contrast_limits = (0, 255)
+
+            # Restore original selection
+            self.viewer.layers.selection.clear()
+            for layer in current_selected:
+                self.viewer.layers.selection.add(layer)
 
             # Store results
             self.data_manager.preprocessed_data = processed_stack
@@ -593,7 +633,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
             ))
         finally:
             self._set_controls_enabled(True)
-
     def cleanup(self):
         """Clean up resources"""
         if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
