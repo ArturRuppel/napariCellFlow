@@ -1,0 +1,15 @@
+Metadata-Version: 2.1
+Name: napari-cellpose-stackmode
+Version: 0.1.0
+Summary: A napari plugin for running Cellpose model on image stacks
+Home-page: https://github.com/ArturRuppel/napari_cellpose_stackmode
+Author: aruppel
+License: MIT
+Requires-Python: >=3.9
+License-File: LICENCE
+Requires-Dist: napari
+Requires-Dist: numpy
+Requires-Dist: qtpy
+Requires-Dist: scikit-image
+Requires-Dist: tifffile
+Requires-Dist: pyyaml

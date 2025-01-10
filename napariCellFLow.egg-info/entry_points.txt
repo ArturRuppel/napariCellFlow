@@ -1,0 +1,2 @@
+[napari.plugin]
+napari-cellpose-stackmode = napari_cellpose_stackmode.plugin:napari_experimental_provide_dock_widget

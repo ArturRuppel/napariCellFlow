@@ -1,0 +1,6 @@
+napari
+numpy
+qtpy
+scikit-image
+tifffile
+pyyaml
