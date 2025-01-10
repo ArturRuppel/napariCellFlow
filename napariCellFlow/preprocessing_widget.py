@@ -143,8 +143,8 @@ class PreprocessingWidget(BaseAnalysisWidget):
         group = QGroupBox("Actions")
         layout = QVBoxLayout()
         layout.setSpacing(4)
-        layout.addWidget(self.preprocess_btn)
         layout.addWidget(self.reset_btn)
+        layout.addWidget(self.preprocess_btn)
         group.setLayout(layout)
         return group
 

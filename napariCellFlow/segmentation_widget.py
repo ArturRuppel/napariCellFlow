@@ -55,49 +55,6 @@ class SegmentationWidget(BaseAnalysisWidget):
         self._initialize_model()
         self._update_ui_state()
 
-    def _initialize_controls(self):
-        """Initialize all UI controls"""
-        # Model selection controls
-        self.model_combo = QComboBox()
-        self.model_combo.addItems(["cyto3", "nuclei", "custom"])
-        self.custom_model_btn = QPushButton("Load Custom...")
-        self.custom_model_btn.setEnabled(False)
-
-        # Parameter controls
-        self.diameter_spin = QDoubleSpinBox()
-        self.diameter_spin.setRange(0.1, 1000.0)
-        self.diameter_spin.setValue(95.0)
-
-        self.flow_spin = QDoubleSpinBox()
-        self.flow_spin.setRange(0.0, 1.0)
-        self.flow_spin.setValue(0.6)
-        self.flow_spin.setSingleStep(0.1)
-
-        self.prob_spin = QDoubleSpinBox()
-        self.prob_spin.setRange(0.0, 1.0)
-        self.prob_spin.setValue(0.3)
-        self.prob_spin.setSingleStep(0.1)
-
-        self.size_spin = QSpinBox()
-        self.size_spin.setRange(1, 10000)
-        self.size_spin.setValue(25)
-
-        # Option controls
-        self.gpu_check = QCheckBox("Use GPU")
-        self.normalize_check = QCheckBox("Normalize")
-        self.compute_diameter_check = QCheckBox("Auto-compute diameter")
-
-        # Set checkbox defaults
-        self.gpu_check.setChecked(True)
-        self.normalize_check.setChecked(True)
-        self.compute_diameter_check.setChecked(True)
-
-        # Action buttons
-        self.run_btn = QPushButton("Run Segmentation")
-        self.run_stack_btn = QPushButton("Process Stack")
-        self.export_btn = QPushButton("Export to Cellpose")
-        self.import_btn = QPushButton("Import from Cellpose")
-
     def _setup_ui(self):
         """Initialize the user interface"""
         # Create right side container
@@ -120,12 +77,15 @@ class SegmentationWidget(BaseAnalysisWidget):
 
         # Parameters Section
         params_group = QGroupBox("Parameters")
+        params_layout = QVBoxLayout()
         form_layout = QFormLayout()
         form_layout.addRow("Cell Diameter:", self.diameter_spin)
         form_layout.addRow("Flow Threshold:", self.flow_spin)
         form_layout.addRow("Cell Probability:", self.prob_spin)
         form_layout.addRow("Min Size:", self.size_spin)
-        params_group.setLayout(form_layout)
+        params_layout.addLayout(form_layout)
+        params_layout.addWidget(self.reset_params_btn)
+        params_group.setLayout(params_layout)
         right_layout.addWidget(params_group)
 
         # Options Section
@@ -163,8 +123,8 @@ class SegmentationWidget(BaseAnalysisWidget):
         cellpose_group = QGroupBox("Cellpose Integration")
         cellpose_layout = QVBoxLayout()
         info_label = QLabel(
-            "You can export the current segmentation to edit in Cellpose, "
-            "then import the corrected results back."
+            "Export segmentation data for model training in Cellpose, "
+            "then import the processed results back."
         )
         info_label.setWordWrap(True)
         cellpose_layout.addWidget(info_label)
@@ -201,9 +161,74 @@ class SegmentationWidget(BaseAnalysisWidget):
             self.diameter_spin, self.flow_spin, self.prob_spin, self.size_spin,
             self.gpu_check, self.normalize_check, self.compute_diameter_check,
             self.run_btn, self.run_stack_btn,
-            self.export_btn, self.import_btn
+            self.export_btn, self.import_btn, self.reset_params_btn
         ]:
             self.register_control(control)
+    def _initialize_controls(self):
+        """Initialize all UI controls"""
+        # Model selection controls
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(["cyto3", "nuclei", "custom"])
+        self.custom_model_btn = QPushButton("Load Custom...")
+        self.custom_model_btn.setEnabled(False)
+
+        # Parameter controls
+        self.diameter_spin = QDoubleSpinBox()
+        self.diameter_spin.setRange(0.1, 1000.0)
+        self.diameter_spin.setValue(95.0)
+
+        self.flow_spin = QDoubleSpinBox()
+        self.flow_spin.setRange(0.0, 1.0)
+        self.flow_spin.setValue(0.6)
+        self.flow_spin.setSingleStep(0.1)
+
+        self.prob_spin = QDoubleSpinBox()
+        self.prob_spin.setRange(0.0, 1.0)
+        self.prob_spin.setValue(0.0)
+        self.prob_spin.setSingleStep(0.1)
+
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(1, 10000)
+        self.size_spin.setValue(25)
+
+        # Option controls
+        self.gpu_check = QCheckBox("Use GPU")
+        self.normalize_check = QCheckBox("Normalize")
+        self.compute_diameter_check = QCheckBox("Auto-compute diameter")
+
+        # Set checkbox defaults
+        self.gpu_check.setChecked(True)
+        self.normalize_check.setChecked(True)
+        self.compute_diameter_check.setChecked(False)
+
+        # Action buttons
+        self.run_btn = QPushButton("Run Segmentation")
+        self.run_stack_btn = QPushButton("Process Stack")
+        self.export_btn = QPushButton("Export to Cellpose")
+        self.import_btn = QPushButton("Import from Cellpose")
+        self.reset_params_btn = QPushButton("Reset Parameters")
+
+    def _create_cellpose_group(self) -> QGroupBox:
+        """Create Cellpose integration group"""
+        group = QGroupBox("Cellpose Integration")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+
+        info_label = QLabel(
+            "Export segmentation data for model training in Cellpose, "
+            "then import the processed results back."
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.export_btn)
+        button_layout.addWidget(self.import_btn)
+        button_layout.addWidget(self.reset_params_btn)
+        layout.addLayout(button_layout)
+
+        group.setLayout(layout)
+        return group
 
     def _connect_signals(self):
         """Connect all signal handlers"""
@@ -226,12 +251,118 @@ class SegmentationWidget(BaseAnalysisWidget):
         self.run_stack_btn.clicked.connect(self._run_stack_segmentation)
         self.export_btn.clicked.connect(self.export_to_cellpose)
         self.import_btn.clicked.connect(self.import_from_cellpose)
+        self.reset_params_btn.clicked.connect(self.reset_parameters)
 
         # Layer change handlers
         if self.viewer is not None:
             self.viewer.layers.events.inserted.connect(self._update_ui_state)
             self.viewer.layers.events.removed.connect(self._update_ui_state)
             self.viewer.layers.selection.events.changed.connect(self._update_ui_state)
+
+    def reset_parameters(self):
+        """Reset all parameters to defaults"""
+        self.diameter_spin.setValue(95.0)
+        self.flow_spin.setValue(0.6)
+        self.prob_spin.setValue(0.0)
+        self.size_spin.setValue(25)
+        self.gpu_check.setChecked(True)
+        self.normalize_check.setChecked(True)
+        self.compute_diameter_check.setChecked(False)
+        self.parameters_updated.emit()
+
+    def import_from_cellpose(self):
+        """Import processed masks and images from Cellpose"""
+        try:
+            # First open the file dialog
+            import_dir = QFileDialog.getExistingDirectory(
+                self,
+                "Select Directory with Processed Files",
+                str(self._last_export_dir) if self._last_export_dir else str(Path.home())
+            )
+
+            if not import_dir:
+                return  # User cancelled
+
+            self._processing = True
+            self._set_controls_enabled(False)
+            import_dir = Path(import_dir)
+
+            self._update_status("Starting import...", 0)
+
+            # Look for files to determine number of frames
+            import glob
+            mask_files = sorted(glob.glob(str(import_dir / 'img_*_seg.npy')))
+            if not mask_files:
+                raise ProcessingError(
+                    "No mask files found",
+                    "Selected directory doesn't contain any Cellpose mask files (img_*_seg.npy)"
+                )
+
+            num_frames = len(mask_files)
+            imported_masks = []
+            imported_images = []
+
+            # Load data
+            import tifffile
+            for i in range(num_frames):
+                progress = int(90 * i / num_frames)
+                self._update_status(f"Loading frame {i + 1}/{num_frames}", progress)
+
+                # Check for files
+                mask_file = import_dir / f'img_{i:03d}_seg.npy'
+                image_file = import_dir / f'img_{i:03d}.tif'
+
+                if not mask_file.exists() or not image_file.exists():
+                    raise ProcessingError(
+                        "Missing files",
+                        f"Could not find mask or image file for frame {i}"
+                    )
+
+                # Load data
+                data = np.load(mask_file, allow_pickle=True).item()
+                if 'masks' not in data:
+                    raise ProcessingError(
+                        "Invalid mask data",
+                        f"Frame {i} doesn't contain mask data"
+                    )
+                imported_masks.append(data['masks'])
+
+                image = tifffile.imread(image_file)
+                imported_images.append(image)
+
+            self._update_status("Processing data...", 95)
+
+            # Stack the data
+            imported_stack = np.stack(imported_masks)
+            image_stack = np.stack(imported_images)
+
+            # Initialize data manager with correct number of frames
+            self.data_manager.initialize_stack(num_frames)
+
+            # Update visualizations
+            self.data_manager.segmentation_data = imported_stack
+
+            if 'Cellpose_Imported' in self.viewer.layers:
+                self.viewer.layers['Cellpose_Imported'].data = image_stack
+            else:
+                self.viewer.add_image(
+                    image_stack,
+                    name='Cellpose_Imported',
+                    visible=True
+                )
+
+            self.visualization_manager.update_tracking_visualization(imported_stack)
+            self._update_status("Import complete", 100)
+
+        except Exception as e:
+            self._handle_error(ProcessingError(
+                "Failed to import data",
+                str(e),
+                self.__class__.__name__
+            ))
+        finally:
+            self._processing = False
+            self._set_controls_enabled(True)
 
     def _run_segmentation(self):
         """Run segmentation on current frame"""
@@ -548,99 +679,6 @@ class SegmentationWidget(BaseAnalysisWidget):
                 self.__class__.__name__
             ))
 
-    def import_from_cellpose(self):
-        """Import corrected masks and images from Cellpose"""
-        try:
-            # First open the file dialog
-            import_dir = QFileDialog.getExistingDirectory(
-                self,
-                "Select Directory with Corrected Files",
-                str(self._last_export_dir) if self._last_export_dir else str(Path.home())
-            )
-
-            if not import_dir:
-                return  # User cancelled
-
-            self._processing = True
-            self._set_controls_enabled(False)
-            import_dir = Path(import_dir)
-
-            self._update_status("Starting import...", 0)
-
-            # Look for files to determine number of frames
-            import glob
-            mask_files = sorted(glob.glob(str(import_dir / 'img_*_seg.npy')))
-            if not mask_files:
-                raise ProcessingError(
-                    "No mask files found",
-                    "Selected directory doesn't contain any Cellpose mask files (img_*_seg.npy)"
-                )
-
-            num_frames = len(mask_files)
-            corrected_masks = []
-            corrected_images = []
-
-            # Load data
-            import tifffile
-            for i in range(num_frames):
-                progress = int(90 * i / num_frames)
-                self._update_status(f"Loading frame {i + 1}/{num_frames}", progress)
-
-                # Check for files
-                mask_file = import_dir / f'img_{i:03d}_seg.npy'
-                image_file = import_dir / f'img_{i:03d}.tif'
-
-                if not mask_file.exists() or not image_file.exists():
-                    raise ProcessingError(
-                        "Missing files",
-                        f"Could not find mask or image file for frame {i}"
-                    )
-
-                # Load data
-                data = np.load(mask_file, allow_pickle=True).item()
-                if 'masks' not in data:
-                    raise ProcessingError(
-                        "Invalid mask data",
-                        f"Frame {i} doesn't contain mask data"
-                    )
-                corrected_masks.append(data['masks'])
-
-                image = tifffile.imread(image_file)
-                corrected_images.append(image)
-
-            self._update_status("Processing data...", 95)
-
-            # Stack the data
-            corrected_stack = np.stack(corrected_masks)
-            image_stack = np.stack(corrected_images)
-
-            # Initialize data manager with correct number of frames
-            self.data_manager.initialize_stack(num_frames)
-
-            # Update visualizations
-            self.data_manager.segmentation_data = corrected_stack
-
-            if 'Cellpose_Corrected' in self.viewer.layers:
-                self.viewer.layers['Cellpose_Corrected'].data = image_stack
-            else:
-                self.viewer.add_image(
-                    image_stack,
-                    name='Cellpose_Corrected',
-                    visible=True
-                )
-
-            self.visualization_manager.update_tracking_visualization(corrected_stack)
-            self._update_status("Import complete", 100)
-
-        except Exception as e:
-            self._handle_error(ProcessingError(
-                "Failed to import corrections",
-                str(e),
-                self.__class__.__name__
-            ))
-        finally:
-            self._processing = False
-            self._set_controls_enabled(True)
     def cleanup(self):
         """Clean up resources"""
         if hasattr(self, 'correction_widget'):
@@ -733,27 +771,6 @@ class SegmentationWidget(BaseAnalysisWidget):
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.run_btn)
         button_layout.addWidget(self.run_stack_btn)
-        layout.addLayout(button_layout)
-
-        group.setLayout(layout)
-        return group
-
-    def _create_cellpose_group(self) -> QGroupBox:
-        """Create Cellpose integration group"""
-        group = QGroupBox("Cellpose Integration")
-        layout = QVBoxLayout()
-        layout.setSpacing(4)
-
-        info_label = QLabel(
-            "You can export the current segmentation to edit in Cellpose, "
-            "then import the corrected results back."
-        )
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.export_btn)
-        button_layout.addWidget(self.import_btn)
         layout.addLayout(button_layout)
 
         group.setLayout(layout)
