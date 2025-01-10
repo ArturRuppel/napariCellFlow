@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/napari_cellpose_stackmode.iml" filepath="$PROJECT_DIR$/.idea/napari_cellpose_stackmode.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/napariCellFlow.iml" filepath="$PROJECT_DIR$/.idea/napariCellFlow.iml" />
     </modules>
   </component>
 </project>
