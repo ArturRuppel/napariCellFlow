@@ -11,7 +11,7 @@ import numpy as np
 from skimage.measure import regionprops
 import tifffile
 
-from structure import TrackingParameters, AnalysisConfig
+from napariCellFlow.structure import TrackingParameters, AnalysisConfig
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +46,23 @@ class CellTracker:
         if len(segmentation_stack.shape) != 3:
             raise ValueError("Expected 3D stack (t, x, y)")
 
+        # Fix duplicate logging
+        root_logger = logging.getLogger()
+        if root_logger.handlers:
+            root_logger.handlers = [root_logger.handlers[0]]
+
         total_frames = len(segmentation_stack)
         tracked_segmentation = np.zeros_like(segmentation_stack)
         all_used_ids: Set[int] = set()
+        future_assignments = {}
+
+        logger.debug("=== Starting tracking process ===")
+        logger.debug(f"Input stack shape: {segmentation_stack.shape}")
+        logger.debug(f"Input first frame unique IDs: {set(np.unique(segmentation_stack[0])) - {0} }")
 
         self._update_progress(0, "Initializing tracking...")
 
-        # Filter small cells
+        # Filter small cells if needed
         if self.params.min_cell_size > 0:
             self._update_progress(5, "Filtering small cells...")
             mask = np.zeros_like(segmentation_stack, dtype=bool)
@@ -68,12 +78,22 @@ class CellTracker:
         self._update_progress(20, "Processing first frame...")
         first_frame = segmentation_stack[0]
         regions = self._cache_regions(first_frame, 0)
+        logger.debug(f"Number of regions found in first frame: {len(regions)}")
+        logger.debug(f"Region labels: {[r.label for r in regions]}")
+
         sorted_regions = sorted(regions, key=lambda r: np.linalg.norm(r.centroid))
+        logger.debug(f"Regions after sorting: {[r.label for r in sorted_regions]}")
+
         id_mapping = {region.label: idx for idx, region in enumerate(sorted_regions, start=1)}
+        logger.debug(f"ID mapping for first frame: {id_mapping}")
+
         tracked_segmentation[0] = np.zeros_like(first_frame)
         for old_id, new_id in id_mapping.items():
             tracked_segmentation[0][first_frame == old_id] = new_id
             all_used_ids.add(new_id)
+            logger.debug(f"Mapped ID {old_id} -> {new_id}")
+
+        logger.debug(f"Unique IDs in tracked first frame: {set(np.unique(tracked_segmentation[0])) - {0} }")
 
         # Process subsequent frames
         for t in range(total_frames - 1):
@@ -95,14 +115,25 @@ class CellTracker:
             tracked_segmentation[t + 1] = np.zeros_like(next_frame)
             assigned_ids: Set[int] = set()
 
+            # Handle gap closing if enabled
             if self.params.enable_gap_closing and t >= self.params.max_frame_gap:
-                self._handle_gap_closing_optimized(
-                    tracked_segmentation,
-                    t,
-                    overlap_matrix,
-                    assigned_ids
+                logger.debug(f"Running gap closing for frame {t}")
+                gap_assignments = self._handle_gap_closing(
+                    tracked_segmentation=tracked_segmentation,
+                    current_frame=t,
+                    overlap_matrix=overlap_matrix,
+                    assigned_ids=assigned_ids,
+                    segmentation_stack=segmentation_stack
                 )
 
+                # Merge new assignments with existing future assignments
+                for frame_idx, assignments in gap_assignments.items():
+                    if frame_idx not in future_assignments:
+                        future_assignments[frame_idx] = {}
+                    future_assignments[frame_idx].update(assignments)
+                    logger.debug(f"Added assignments for frame {frame_idx}: {assignments.keys()}")
+
+            # Process normal tracking for next frame
             self._process_frame_regions_optimized(
                 next_frame,
                 tracked_segmentation[t + 1],
@@ -111,8 +142,115 @@ class CellTracker:
                 all_used_ids
             )
 
+            # Apply any assignments for this frame
+            if t + 1 in future_assignments:
+                logger.debug(f"Applying stored assignments for frame {t + 1}")
+                frame_assignments = future_assignments[t + 1]
+                for cell_id, (next_id, mask) in frame_assignments.items():
+                    logger.debug(f"Applying assignment: cell {cell_id} -> {next_id}")
+                    tracked_segmentation[t + 1][mask] = cell_id
+                    logger.debug(f"After applying assignment, unique IDs in frame {t + 1}: "
+                                 f"{set(np.unique(tracked_segmentation[t + 1])) - {0} }")
+                del future_assignments[t + 1]
+
+            logger.debug(f"Completed processing frame {t + 1}")
+            logger.debug(f"Unique IDs in frame {t + 1}: {set(np.unique(tracked_segmentation[t + 1])) - {0} }")
+
         self._update_progress(100, "Tracking complete")
         return tracked_segmentation
+
+    def _handle_gap_closing(
+            self,
+            tracked_segmentation: np.ndarray,
+            current_frame: int,
+            overlap_matrix: Dict[int, List[Tuple[int, int, float]]],
+            assigned_ids: Set[int],
+            segmentation_stack: np.ndarray
+    ) -> Dict[int, Dict[int, Tuple[int, np.ndarray]]]:
+        """Gap closing that returns assignments for future frames."""
+        logger.debug(f"=== Starting gap closing for frame {current_frame} ===")
+        logger.debug(f"Track matrix shape: {tracked_segmentation.shape}")
+        logger.debug(f"Max frame gap: {self.params.max_frame_gap}")
+
+        # Get labels from current frame
+        current_labels = set(np.unique(tracked_segmentation[current_frame]))
+        current_labels.discard(0)
+
+        # Look back to find disappeared cells
+        prev_frame = current_frame - 1
+        if prev_frame < 0:
+            return {}
+
+        prev_labels = set(np.unique(tracked_segmentation[prev_frame]))
+        prev_labels.discard(0)
+
+        # Find cells that disappeared
+        disappeared_cells = prev_labels - current_labels
+        if not disappeared_cells:
+            return {}
+
+        # Check up to max_frame_gap frames ahead
+        max_look_ahead = min(self.params.max_frame_gap, len(tracked_segmentation) - current_frame - 1)
+        logger.debug(f"Looking ahead up to {max_look_ahead} frames")
+
+        # Store assignments for each frame
+        frame_assignments = {}
+
+        for cell_id in disappeared_cells:
+            if cell_id in assigned_ids:
+                logger.debug(f"Cell {cell_id} already assigned, skipping")
+                continue
+
+            logger.debug(f"Processing disappeared cell {cell_id}")
+
+            disappeared_cell_frame = np.zeros_like(tracked_segmentation[prev_frame])
+            disappeared_cell_mask = tracked_segmentation[prev_frame] == cell_id
+            disappeared_cell_frame[disappeared_cell_mask] = cell_id
+
+            if not np.any(disappeared_cell_mask):
+                continue
+
+            best_score = -1
+            best_match = None
+
+            for frame_offset in range(1, max_look_ahead + 1):
+                future_frame = current_frame + frame_offset
+                logger.debug(f"Checking frame {future_frame} for cell {cell_id}")
+
+                next_frame_data = segmentation_stack[future_frame]
+
+                adjusted_max_displacement = self.params.max_displacement * (frame_offset + 1)
+                adjusted_min_overlap = self.params.min_overlap_ratio * (0.9 ** frame_offset)
+
+                gap_matrix = self._calculate_overlap_matrix(
+                    disappeared_cell_frame,
+                    next_frame_data,
+                    prev_frame,
+                    future_frame,
+                    max_displacement=adjusted_max_displacement,
+                    min_overlap_ratio=adjusted_min_overlap
+                )
+
+                if cell_id in gap_matrix and gap_matrix[cell_id]:
+                    next_id, overlap, score = gap_matrix[cell_id][0]
+                    logger.debug(f"Frame {future_frame}: Found potential match "
+                                 f"next_id={next_id}, overlap={overlap}, score={score}")
+
+                    if score > best_score:
+                        mask = next_frame_data == next_id
+                        best_score = score
+                        best_match = (future_frame, next_id, mask)
+
+            if best_match:
+                future_frame, next_id, mask = best_match
+                if future_frame not in frame_assignments:
+                    frame_assignments[future_frame] = {}
+                frame_assignments[future_frame][cell_id] = (next_id, mask)
+                logger.debug(f"Storing assignment for frame {future_frame}: cell {cell_id} -> {next_id}")
+                logger.debug(f"Mask sum: {np.sum(mask)}")
+
+        logger.debug(f"Returning assignments for frames: {list(frame_assignments.keys())}")
+        return frame_assignments
 
     def update_parameters(self, new_params: TrackingParameters):
         """Update tracking parameters"""
@@ -175,7 +313,6 @@ class CellTracker:
                 all_used_ids.add(new_id)
                 assigned_ids.add(label)
 
-
     def _calculate_overlap_matrix(
             self,
             current_frame: np.ndarray,
@@ -188,14 +325,21 @@ class CellTracker:
         """Optimized overlap calculation using cached region properties"""
         overlap_matrix = defaultdict(list)
 
+        # Get regions for both frames
         current_regions = self._cache_regions(current_frame, current_idx)
         next_regions = self._cache_regions(next_frame, next_idx)
+
+        # If either frame is empty, return empty matrix
+        if not current_regions or not next_regions:
+            logger.debug(f"Empty regions detected - current: {len(current_regions)}, next: {len(next_regions)}")
+            return overlap_matrix
 
         # Create lookup dictionaries
         next_lookup = {r.label: r for r in next_regions}
 
-        # Pre-calculate label sets for vectorized operations
+        # Pre-calculate arrays for vectorized operations
         next_labels = np.array([r.label for r in next_regions])
+        next_centroids = np.array([r.centroid for r in next_regions])
 
         for current_region in current_regions:
             current_id = current_region.label
@@ -203,8 +347,13 @@ class CellTracker:
 
             # Vectorized distance calculation
             current_centroid = current_region.centroid
-            next_centroids = np.array([r.centroid for r in next_regions])
-            distances = np.linalg.norm(next_centroids - current_centroid, axis=1)
+            try:
+                distances = np.linalg.norm(next_centroids - current_centroid, axis=1)
+            except ValueError as e:
+                logger.error(f"Distance calculation failed: {e}")
+                logger.debug(f"Current centroid shape: {current_centroid.shape}")
+                logger.debug(f"Next centroids shape: {next_centroids.shape}")
+                continue
 
             # Filter by distance
             valid_indices = distances <= max_displacement
@@ -234,81 +383,11 @@ class CellTracker:
                             if combined_score >= min_overlap_ratio:
                                 candidates.append((next_id, overlap, combined_score))
 
-            if candidates:
-                candidates.sort(key=lambda x: x[2], reverse=True)
-                overlap_matrix[current_id] = candidates
+                if candidates:
+                    candidates.sort(key=lambda x: x[2], reverse=True)
+                    overlap_matrix[current_id] = candidates
 
         return overlap_matrix
-
-    def _handle_gap_closing_optimized(
-            self,
-            tracked_segmentation: np.ndarray,
-            current_frame: int,
-            overlap_matrix: Dict[int, List[Tuple[int, int]]],
-            assigned_ids: Set[int]
-    ) -> None:
-        """Optimized gap closing using cached region properties"""
-        # Pre-calculate unique labels for current frame
-        current_labels = set(np.unique(tracked_segmentation[current_frame]))
-        current_labels.discard(0)
-
-        # Process gaps in reverse order for efficiency
-        for gap in range(self.params.max_frame_gap, 0, -1):
-            prev_frame = current_frame - gap
-            if prev_frame < 0:
-                continue
-
-            # Vectorized set operations for disappearing cells
-            prev_labels = set(np.unique(tracked_segmentation[prev_frame]))
-            prev_labels.discard(0)
-            disappearing_cells = prev_labels - current_labels
-
-            if not disappearing_cells:
-                continue
-
-            # Cache regions for both frames
-            prev_regions = {r.label: r for r in self._cache_regions(tracked_segmentation[prev_frame], prev_frame)}
-            current_regions = {r.label: r for r in self._cache_regions(tracked_segmentation[current_frame], current_frame)}
-
-            # Process disappearing cells
-            for cell_id in disappearing_cells:
-                if cell_id in assigned_ids:
-                    continue
-
-                prev_region = prev_regions.get(cell_id)
-                if prev_region is None:
-                    continue
-
-                # Vectorized distance and size comparison
-                prev_centroid = prev_region.centroid
-                prev_area = prev_region.area
-
-                best_match = None
-                best_score = float('inf')
-
-                # Calculate all distances at once
-                current_centroids = np.array([r.centroid for r in current_regions.values()])
-                distances = np.linalg.norm(current_centroids - prev_centroid, axis=1)
-
-                valid_indices = distances <= (self.params.max_displacement * gap)
-                if not np.any(valid_indices):
-                    continue
-
-                # Process valid candidates
-                valid_regions = [r for i, r in enumerate(current_regions.values()) if valid_indices[i]]
-                for region in valid_regions:
-                    if region.label not in assigned_ids:
-                        displacement = distances[list(current_regions.values()).index(region)]
-                        size_diff = abs(region.area - prev_area) / prev_area
-                        score = displacement + size_diff * 100
-
-                        if score < best_score:
-                            best_score = score
-                            best_match = region.label
-
-                if best_match is not None:
-                    # Add a dummy overlap value and use score as the combined_score
-                    overlap_matrix[cell_id].append((best_match, prev_area, 1.0 - (best_score / (self.params.max_displacement * gap))))
 
     def _process_frame_regions(
             self,
@@ -350,35 +429,40 @@ class CellTracker:
 
 
 if __name__ == "__main__":
-    # Set up logging
-    logging.basicConfig(level=logging.INFO)
+    # Set up detailed logging
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        force=True  # This ensures our configuration takes precedence
+    )
+
+    # Create a console handler with the same formatter
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(formatter)
+
+    # Add the console handler to the root logger
+    root_logger = logging.getLogger()
+    root_logger.addHandler(console_handler)
 
     # Load the segmentation stack
-    segmentation_path = Path(r"D:\2024-11-27\position0\registered_data\segmentation.tif")
+    segmentation_path = Path(r"C:\Users\aruppel\Desktop\segmentation.tif")
     segmentation_stack = tifffile.imread(str(segmentation_path))
 
     # Create dummy config
     config = AnalysisConfig()
 
-    # Initialize tracker
+    # Initialize tracker with gap closing enabled
     tracker = CellTracker(config)
-
-    # Set up profiler
-    pr = cProfile.Profile()
-    pr.enable()
+    params = TrackingParameters()
+    params.enable_gap_closing = True
+    params.max_frame_gap = 2
+    tracker.update_parameters(params)
 
     # Run tracking
     logger.info("Starting cell tracking...")
     tracked_stack = tracker.track_cells(segmentation_stack)
-
-    # Stop profiler
-    pr.disable()
-
-    # Print profiling results
-    s = io.StringIO()
-    ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
-    ps.print_stats(30)
-    logger.info(f"\nProfiling results:\n{s.getvalue()}")
 
     # Save results
     output_path = segmentation_path.parent / "tracked_segmentation.tif"

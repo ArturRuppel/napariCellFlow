@@ -308,17 +308,33 @@ class CellTrackingWidget(BaseAnalysisWidget):
 
     def reset_parameters(self):
         """Reset all parameters to defaults"""
+        # Create new default parameters
         self.tracking_params = TrackingParameters()
 
+        # Temporarily disconnect signals
+        self.overlap_spin.valueChanged.disconnect(self.update_parameters)
+        self.displacement_spin.valueChanged.disconnect(self.update_parameters)
+        self.cell_size_spin.valueChanged.disconnect(self.update_parameters)
+        self.gap_closing_check.toggled.disconnect(self.update_parameters)
+        self.gap_frames_spin.valueChanged.disconnect(self.update_parameters)
+
+        # Set all values without triggering updates
         self.overlap_spin.setValue(self.tracking_params.min_overlap_ratio)
         self.displacement_spin.setValue(self.tracking_params.max_displacement)
         self.cell_size_spin.setValue(self.tracking_params.min_cell_size)
         self.gap_closing_check.setChecked(self.tracking_params.enable_gap_closing)
         self.gap_frames_spin.setValue(self.tracking_params.max_frame_gap)
 
+        # Reconnect signals
+        self.overlap_spin.valueChanged.connect(self.update_parameters)
+        self.displacement_spin.valueChanged.connect(self.update_parameters)
+        self.cell_size_spin.valueChanged.connect(self.update_parameters)
+        self.gap_closing_check.toggled.connect(self.update_parameters)
+        self.gap_frames_spin.valueChanged.connect(self.update_parameters)
+
+        # Update once with all reset values
         self._update_status("Parameters reset to defaults")
         self.update_parameters()
-
     def cleanup(self):
         """Clean up resources"""
         super().cleanup()
