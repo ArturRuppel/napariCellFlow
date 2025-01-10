@@ -422,7 +422,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
         if self.viewer is not None:
             self.viewer.dims.events.current_step.connect(self.update_preview_frame)
 
-
     def update_preview_frame(self, event: Optional[Event] = None):
         """Update the preview for the current frame"""
         if not self.preview_enabled or self.original_layer is None:
