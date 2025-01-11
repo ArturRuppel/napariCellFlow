@@ -161,6 +161,7 @@ class SegmentationWidget(BaseAnalysisWidget):
             self.export_btn, self.import_btn, self.reset_params_btn
         ]:
             self.register_control(control)
+
     def _initialize_controls(self):
         """Initialize all UI controls"""
         # Model selection controls
@@ -269,6 +270,9 @@ class SegmentationWidget(BaseAnalysisWidget):
 
     def import_from_cellpose(self):
         """Import processed masks and images from Cellpose"""
+        if getattr(self, '_processing', False):
+            return
+
         try:
             # First open the file dialog
             import_dir = QFileDialog.getExistingDirectory(
@@ -316,41 +320,69 @@ class SegmentationWidget(BaseAnalysisWidget):
                     )
 
                 # Load data
-                data = np.load(mask_file, allow_pickle=True).item()
-                if 'masks' not in data:
-                    raise ProcessingError(
-                        "Invalid mask data",
-                        f"Frame {i} doesn't contain mask data"
-                    )
-                imported_masks.append(data['masks'])
+                try:
+                    data = np.load(mask_file, allow_pickle=True).item()
+                    if 'masks' not in data:
+                        raise ProcessingError(
+                            "Invalid mask data",
+                            f"Frame {i} doesn't contain mask data"
+                        )
+                    imported_masks.append(data['masks'])
 
-                image = tifffile.imread(image_file)
-                imported_images.append(image)
+                    image = tifffile.imread(image_file)
+                    imported_images.append(image)
+                except Exception as e:
+                    raise ProcessingError(
+                        f"Error loading frame {i}",
+                        f"Failed to load data from files: {str(e)}"
+                    )
 
             self._update_status("Processing data...", 95)
 
-            # Stack the data
-            imported_stack = np.stack(imported_masks)
-            image_stack = np.stack(imported_images)
+            try:
+                # Stack the data
+                imported_stack = np.stack(imported_masks)
+                image_stack = np.stack(imported_images)
 
-            # Initialize data manager with correct number of frames
-            self.data_manager.initialize_stack(num_frames)
+                # Validate dimensions
+                if imported_stack.ndim < 2 or image_stack.ndim < 2:
+                    raise ProcessingError(
+                        "Invalid data dimensions",
+                        "Imported data has incorrect dimensionality"
+                    )
 
-            # Update visualizations
-            self.data_manager.segmentation_data = imported_stack
+                # Initialize data manager with correct number of frames
+                self.data_manager.initialize_stack(num_frames)
 
-            if 'Cellpose_Imported' in self.viewer.layers:
-                self.viewer.layers['Cellpose_Imported'].data = image_stack
-            else:
-                self.viewer.add_image(
-                    image_stack,
-                    name='Cellpose_Imported',
-                    visible=True
+                # Update visualizations
+                self.data_manager.segmentation_data = imported_stack
+
+                # Update or create image layer
+                if 'Cellpose_Imported' in self.viewer.layers:
+                    self.viewer.layers['Cellpose_Imported'].data = image_stack
+                else:
+                    self.viewer.add_image(
+                        image_stack,
+                        name='Cellpose_Imported',
+                        visible=True
+                    )
+
+                # Update tracking visualization
+                self.visualization_manager.update_tracking_visualization(imported_stack)
+
+                # Store successful import directory
+                self._last_export_dir = import_dir
+
+                self._update_status("Import complete", 100)
+
+            except Exception as e:
+                raise ProcessingError(
+                    "Failed to process imported data",
+                    str(e)
                 )
 
-            self.visualization_manager.update_tracking_visualization(imported_stack)
-            self._update_status("Import complete", 100)
-
+        except ProcessingError as pe:
+            self._handle_error(pe)
         except Exception as e:
             self._handle_error(ProcessingError(
                 "Failed to import data",
@@ -360,6 +392,8 @@ class SegmentationWidget(BaseAnalysisWidget):
         finally:
             self._processing = False
             self._set_controls_enabled(True)
+            # Ensure UI state is properly updated regardless of success/failure
+            self._update_ui_state()
 
     def _run_segmentation(self):
         """Run segmentation on current frame"""
@@ -487,6 +521,7 @@ class SegmentationWidget(BaseAnalysisWidget):
         finally:
             self._processing = False
             self._set_controls_enabled(True)
+
     def _on_model_changed(self, model_type: str):
         """Handle model type change"""
         self.custom_model_btn.setEnabled(model_type == "custom")
@@ -545,17 +580,31 @@ class SegmentationWidget(BaseAnalysisWidget):
 
     def _update_ui_state(self):
         """Update UI based on current state"""
-        has_image = self._get_active_image_layer() is not None
-        model_initialized = self.segmentation.model is not None
-
-        for control in self._controls:
-            control.setEnabled(True)
-
-        self.run_btn.setEnabled(has_image and model_initialized)
-        self.run_stack_btn.setEnabled(has_image and model_initialized)
-        self.custom_model_btn.setEnabled(
-            self.model_combo.currentText() == "custom"
+        # Get current state
+        has_image = bool(self._get_active_image_layer() is not None)  # Ensure boolean
+        model_initialized = bool(self.segmentation.model is not None)  # Ensure boolean
+        has_segmentation_data = bool(  # Ensure boolean
+            self.data_manager.segmentation_data is not None and
+            np.any(self.data_manager.segmentation_data)
         )
+
+        # Update basic controls
+        for control in self._controls:
+            if control not in [self.run_btn, self.run_stack_btn, self.export_btn, self.import_btn]:
+                control.setEnabled(True)
+
+        # Update model-specific controls
+        self.custom_model_btn.setEnabled(bool(self.model_combo.currentText() == "custom"))
+
+        # Update action buttons based on state
+        self.run_btn.setEnabled(bool(has_image and model_initialized))
+        self.run_stack_btn.setEnabled(bool(has_image and model_initialized))
+
+        # Export button enabled only when we have both image and segmentation data
+        self.export_btn.setEnabled(bool(has_image and has_segmentation_data))
+
+        # Import button is always enabled as it's an entry point for data
+        self.import_btn.setEnabled(True)
 
     def _load_custom_model(self):
         """Open file dialog to select custom model"""
@@ -773,13 +822,11 @@ class SegmentationWidget(BaseAnalysisWidget):
         group.setLayout(layout)
         return group
 
-
     def _handle_layer_removal(self, event):
         """Handle layer removal events"""
         removed_layer = event.value
         # Update UI state when layers are removed
         self._update_ui_state()
-
 
     def _get_current_frame_data(self, layer: Image) -> np.ndarray:
         """Get data for current frame"""
@@ -888,4 +935,3 @@ class SegmentationWidget(BaseAnalysisWidget):
         scaled = np.clip(image, img_min, img_max)
         scaled = ((scaled - img_min) / (img_max - img_min) * 255).astype(np.uint8)
         return scaled
-
