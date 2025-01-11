@@ -7,8 +7,6 @@ from cellpose import models
 from cellpose.core import use_gpu
 from qtpy.QtCore import QObject, Signal
 
-logger = logging.getLogger(__name__)
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,46 +52,6 @@ class SegmentationParameters:
         if self.batch_size <= 0:
             raise ValueError("Batch size must be positive")
 
-
-@dataclass
-class SegmentationParameters:
-    """Parameters for Cellpose segmentation"""
-    # Model parameters
-    model_type: str = "cyto3"  # "cyto3", "nuclei", "custom"
-    custom_model_path: Optional[str] = None
-
-    # Cellpose 3.0 parameters
-    diameter: float = 95.0
-    flow_threshold: float = 0.6
-    cellprob_threshold: float = 0.3
-    min_size: int = 25
-    normalize: bool = True
-
-    # Channel parameters
-    chan_segment: int = 0  # channel to segment
-    chan_2: Optional[int] = None  # optional second channel
-
-    # Advanced parameters
-    batch_size: int = 8
-    gpu: bool = True
-    compute_diameter: bool = True  # Auto-compute diameter
-    stitch_threshold: float = 0.0  # For handling tiles
-    resample: bool = False  # Whether to resample pixels
-    anisotropy: Optional[float] = None  # Pixel scaling in z vs xy
-    augment: bool = False  # Use augmentation for inference
-
-    def validate(self):
-        """Validate parameter values"""
-        if self.diameter <= 0 and not self.compute_diameter:
-            raise ValueError("Cell diameter must be positive or compute_diameter must be True")
-        if not 0 <= self.flow_threshold <= 1:
-            raise ValueError("Flow threshold must be between 0 and 1")
-        if not 0 <= self.cellprob_threshold <= 1:
-            raise ValueError("Cell probability threshold must be between 0 and 1")
-        if self.min_size <= 0:
-            raise ValueError("Minimum size must be positive")
-        if self.batch_size <= 0:
-            raise ValueError("Batch size must be positive")
 
 
 class CellposeSignals(QObject):

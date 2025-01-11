@@ -6,9 +6,6 @@ import numpy as np
 from napari.layers import Image
 from qtpy.QtCore import Signal, Qt
 from qtpy.QtWidgets import (
-    QMessageBox
-)
-from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFormLayout,
     QPushButton, QFileDialog, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox,
     QGroupBox, QSizePolicy, QProgressBar, QProgressDialog
