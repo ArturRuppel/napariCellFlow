@@ -208,13 +208,39 @@ class TestCellTrackingWidget:
 
     def test_gap_closing_controls(self, qtbot, widget):
         """Test gap closing control behavior"""
-        assert widget.gap_frames_spin.isEnabled() == widget.gap_closing_check.isChecked()
-
-        # Toggle gap closing
-        widget.gap_closing_check.setChecked(not widget.gap_closing_check.isChecked())
+        # Test that gap closing is enabled/disabled based on value
+        widget.gap_frames_spin.setValue(3)
         qtbot.wait(100)
-        assert widget.gap_frames_spin.isEnabled() == widget.gap_closing_check.isChecked()
+        assert widget.tracking_params.enable_gap_closing is True
+        assert widget.gap_frames_spin.value() == 3
+        assert widget.tracking_params.max_frame_gap == 3
 
+        # When set to 0, gap closing should be disabled
+        widget.gap_frames_spin.setValue(0)
+        qtbot.wait(100)
+        assert widget.tracking_params.enable_gap_closing is False
+        assert widget.gap_frames_spin.value() == 0
+    def test_reset_parameters(self, qtbot, widget):
+        """Test parameter reset functionality"""
+        # Change all parameters to non-default values
+        widget.overlap_spin.setValue(0.8)  # default is usually ~0.3
+        widget.displacement_spin.setValue(50)  # default is usually ~20
+        widget.cell_size_spin.setValue(100)  # default is usually ~4
+        widget.gap_frames_spin.setValue(10)  # default is 1
+        qtbot.wait(100)
+
+        # Reset parameters
+        widget.reset_btn.click()
+        qtbot.wait(100)
+
+        # Verify all parameters are reset to defaults
+        default_params = TrackingParameters()
+        assert abs(widget.overlap_spin.value() - default_params.min_overlap_ratio) < 0.001
+        assert widget.displacement_spin.value() == default_params.max_displacement
+        assert widget.cell_size_spin.value() == default_params.min_cell_size
+        assert widget.gap_frames_spin.value() == 1  # New default value
+        assert widget.tracking_params.enable_gap_closing is True  # Should be enabled with value 1
+        assert widget.tracking_params.max_frame_gap == 1
     @patch('napariCellFlow.cell_tracking_widget.CellTrackingWidget._get_active_labels_layer')
     def test_run_analysis(self, mock_get_layer, qtbot, widget):
         """Test analysis execution"""
@@ -231,25 +257,3 @@ class TestCellTrackingWidget:
         qtbot.wait(100)
         assert widget.data_manager.tracked_data is not None
         widget.visualization_manager.update_tracking_visualization.assert_called_once()
-
-    def test_reset_parameters(self, qtbot, widget):
-        """Test parameter reset functionality"""
-        # Change all parameters to non-default values
-        widget.overlap_spin.setValue(0.8)  # default is usually ~0.3
-        widget.displacement_spin.setValue(50)  # default is usually ~20
-        widget.cell_size_spin.setValue(100)  # default is usually ~4
-        widget.gap_closing_check.setChecked(not widget.gap_closing_check.isChecked())  # toggle from default
-        widget.gap_frames_spin.setValue(10)  # default is usually 2
-        qtbot.wait(100)
-
-        # Reset parameters
-        widget.reset_btn.click()
-        qtbot.wait(100)
-
-        # Verify all parameters are reset to defaults
-        default_params = TrackingParameters()
-        assert abs(widget.overlap_spin.value() - default_params.min_overlap_ratio) < 0.001
-        assert widget.displacement_spin.value() == default_params.max_displacement
-        assert widget.cell_size_spin.value() == default_params.min_cell_size
-        assert widget.gap_closing_check.isChecked() == default_params.enable_gap_closing
-        assert widget.gap_frames_spin.value() == default_params.max_frame_gap
