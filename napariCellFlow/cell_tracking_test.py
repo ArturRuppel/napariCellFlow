@@ -42,7 +42,7 @@ Notes:
 The test coverage for the CellTracker focuses on core functionality and error cases,
 while the widget tests cover both UI interaction and integration with the tracking system.
 """
-
+import napari
 import pytest
 import numpy as np
 from unittest.mock import Mock, patch
@@ -218,9 +218,14 @@ class TestCellTrackingWidget:
     @patch('napariCellFlow.cell_tracking_widget.CellTrackingWidget._get_active_labels_layer')
     def test_run_analysis(self, mock_get_layer, qtbot, widget):
         """Test analysis execution"""
+        # Create a mock that will pass the isinstance check
         mock_layer = Mock()
+        mock_layer.__class__ = napari.layers.Labels
         mock_layer.data = np.zeros((3, 10, 10), dtype=np.int32)
         mock_get_layer.return_value = mock_layer
+
+        # Make sure the button is enabled
+        widget._update_ui_state()
 
         widget.track_btn.click()
         qtbot.wait(100)

@@ -1,4 +1,6 @@
 import logging
+
+import napari
 import numpy as np
 from qtpy.QtCore import Signal
 from qtpy.QtWidgets import (
@@ -41,7 +43,27 @@ class CellTrackingWidget(BaseAnalysisWidget):
         self._setup_ui()
         self._connect_signals()
 
+        # Add layer events handlers
+        self.viewer.layers.events.removed.connect(self._update_ui_state)
+        self.viewer.layers.events.inserted.connect(self._update_ui_state)
+        self.viewer.layers.selection.events.changed.connect(self._update_ui_state)
+
+        # Initial UI state update
+        self._update_ui_state()
+
         logger.debug("CellTrackingWidget initialized")
+
+    def _update_ui_state(self, event=None):
+        """Update UI based on current state"""
+        active_layer = self._get_active_labels_layer()
+        has_valid_labels = (active_layer is not None and
+                            isinstance(active_layer, napari.layers.Labels) and
+                            active_layer.data.ndim in [2, 3])
+
+        # Update button states
+        self.track_btn.setEnabled(has_valid_labels)
+
+        logger.debug(f"UI state updated: has_valid_labels={has_valid_labels}")
 
     def _initialize_controls(self):
         """Initialize all UI controls"""
@@ -185,6 +207,7 @@ class CellTrackingWidget(BaseAnalysisWidget):
         finally:
             self._set_controls_enabled(True)
             logger.debug("Controls re-enabled")
+
     def _create_parameter_group(self) -> QGroupBox:
         """Create tracking parameters group"""
         group = QGroupBox("Tracking Parameters")
@@ -335,10 +358,7 @@ class CellTrackingWidget(BaseAnalysisWidget):
         # Update once with all reset values
         self._update_status("Parameters reset to defaults")
         self.update_parameters()
+
     def cleanup(self):
         """Clean up resources"""
         super().cleanup()
-
-
-
-
