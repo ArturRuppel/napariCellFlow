@@ -417,27 +417,37 @@ class SegmentationWidget(BaseAnalysisWidget):
             if not self._ensure_model_initialized():
                 return
 
-            # Initialize data manager if needed
-            if not self.data_manager._initialized:
-                num_frames = (
-                    image_layer.data.shape[0]
-                    if image_layer.data.ndim > 2
-                    else 1
-                )
-                self.data_manager.initialize_stack(num_frames)
-
             # Get current frame data
             frame_data = self._get_current_frame_data(image_layer)
             masks, metadata = self.segmentation.segment_frame(frame_data)
 
+            # Initialize data manager with proper dimensions
+            num_frames = (
+                image_layer.data.shape[0]
+                if image_layer.data.ndim > 2
+                else 1
+            )
+
+            # Check if we need to create a new layer due to shape mismatch
+            if 'Segmentation' in self.viewer.layers:
+                existing_layer = self.viewer.layers['Segmentation']
+                if existing_layer.data.shape[1:] != masks.shape:
+                    self.viewer.layers.remove('Segmentation')
+
+            # Initialize or reinitialize data manager if needed
+            if (not self.data_manager._initialized or
+                    self.data_manager.segmentation_data is None or
+                    (image_layer.data.ndim > 2 and
+                     self.data_manager.segmentation_data.shape != (num_frames,) + masks.shape)):
+                self.data_manager.initialize_stack(num_frames)
+                self.data_manager.segmentation_data = np.zeros(
+                    (num_frames,) + masks.shape,
+                    dtype=masks.dtype
+                )
+
             # Store results
             if image_layer.data.ndim > 2:
                 current_frame = int(self.viewer.dims.point[0])
-                if self.data_manager.segmentation_data is None:
-                    self.data_manager.segmentation_data = np.zeros(
-                        (image_layer.data.shape[0],) + masks.shape,
-                        dtype=masks.dtype
-                    )
                 self.data_manager.segmentation_data[current_frame] = masks
                 self.visualization_manager.update_tracking_visualization(
                     (masks, current_frame)
@@ -477,6 +487,9 @@ class SegmentationWidget(BaseAnalysisWidget):
             if image_layer is None:
                 raise ProcessingError("No image layer selected")
 
+            if image_layer.data.ndim < 3:
+                raise ProcessingError("Selected layer is not a stack")
+
             # Update model with current parameters
             current_params = self._get_current_parameters()
             self.segmentation.params = current_params
@@ -484,20 +497,29 @@ class SegmentationWidget(BaseAnalysisWidget):
             if not self._ensure_model_initialized():
                 return
 
-            if image_layer.data.ndim < 3:
-                raise ProcessingError("Selected layer is not a stack")
-
-            num_frames = image_layer.data.shape[0]
-            self.data_manager.initialize_stack(num_frames)
-
-            # Pre-allocate the masks array with first frame
+            # Process first frame to get shape
             self._update_status("Processing first frame...", 5)
             first_frame = self.segmentation.segment_frame(image_layer.data[0])[0]
-            masks_stack = np.zeros(
-                (num_frames,) + first_frame.shape,
-                dtype=first_frame.dtype
-            )
-            masks_stack[0] = first_frame
+
+            # Check if we need to create a new layer due to shape mismatch
+            if 'Segmentation' in self.viewer.layers:
+                existing_layer = self.viewer.layers['Segmentation']
+                if existing_layer.data.shape[1:] != first_frame.shape:
+                    self.viewer.layers.remove('Segmentation')
+
+            # Initialize data manager with proper dimensions
+            num_frames = image_layer.data.shape[0]
+            if (not self.data_manager._initialized or
+                    self.data_manager.segmentation_data is None or
+                    self.data_manager.segmentation_data.shape != (num_frames,) + first_frame.shape):
+                self.data_manager.initialize_stack(num_frames)
+                self.data_manager.segmentation_data = np.zeros(
+                    (num_frames,) + first_frame.shape,
+                    dtype=first_frame.dtype
+                )
+
+            # Store first frame result
+            self.data_manager.segmentation_data[0] = first_frame
 
             # Process remaining frames
             for frame_idx in range(1, num_frames):
@@ -510,18 +532,19 @@ class SegmentationWidget(BaseAnalysisWidget):
 
                 frame_data = image_layer.data[frame_idx]
                 masks, _ = self.segmentation.segment_frame(frame_data)
-                masks_stack[frame_idx] = masks
+                self.data_manager.segmentation_data[frame_idx] = masks
 
-            # Update visualization and data
+            # Update visualization
             self._update_status("Updating visualization...", 95)
-            self.data_manager.segmentation_data = masks_stack
-            self.visualization_manager.update_tracking_visualization(masks_stack)
+            self.visualization_manager.update_tracking_visualization(
+                self.data_manager.segmentation_data
+            )
 
             # Ensure the image layer stays selected
             self.viewer.layers.selection.active = image_layer
 
             self._update_status("Stack processing complete", 100)
-            self.segmentation_completed.emit(masks_stack)
+            self.segmentation_completed.emit(self.data_manager.segmentation_data)
 
         except Exception as e:
             self._handle_error(ProcessingError(
