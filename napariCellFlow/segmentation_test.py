@@ -502,10 +502,11 @@ class TestSegmentationWidget:
         mock_image = np.zeros((64, 64), dtype=np.uint8)
         mock_masks = np.zeros_like(mock_image)
 
-        # Setup mock image layer
-        mock_layer = Mock()
-        mock_layer.data = mock_image
-        widget.viewer.layers.selection.active = mock_layer
+        # Create proper napari Image layer instead of Mock
+        from napari.layers import Image
+        image_layer = Image(mock_image, name='test_image')
+        widget.viewer.layers.append(image_layer)
+        widget.viewer.layers.selection.active = image_layer
 
         # Mock segmentation handler
         widget.segmentation.segment_frame.return_value = (mock_masks, {})
@@ -528,10 +529,11 @@ class TestSegmentationWidget:
         mock_stack = np.zeros((5, 64, 64), dtype=np.uint8)
         mock_masks = np.zeros_like(mock_stack)
 
-        # Setup mock image layer
-        mock_layer = Mock()
-        mock_layer.data = mock_stack
-        widget.viewer.layers.selection.active = mock_layer
+        # Create proper napari Image layer for stack
+        from napari.layers import Image
+        stack_layer = Image(mock_stack, name='test_stack')
+        widget.viewer.layers.append(stack_layer)
+        widget.viewer.layers.selection.active = stack_layer
 
         # Mock segmentation handler
         widget.segmentation.segment_frame.return_value = (mock_masks[0], {})
@@ -553,10 +555,12 @@ class TestSegmentationWidget:
         # Test segmentation error
         widget.segmentation.segment_frame.side_effect = Exception("Segmentation failed")
 
-        # Setup mock image layer
-        mock_layer = Mock()
-        mock_layer.data = np.zeros((64, 64))
-        widget.viewer.layers.selection.active = mock_layer
+        # Create proper napari Image layer
+        from napari.layers import Image
+        test_image = np.zeros((64, 64), dtype=np.uint8)
+        image_layer = Image(test_image, name='test_image')
+        widget.viewer.layers.append(image_layer)
+        widget.viewer.layers.selection.active = image_layer
         widget.segmentation.model = Mock()
 
         # Run segmentation and verify error handling
