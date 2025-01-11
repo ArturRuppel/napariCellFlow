@@ -38,7 +38,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             visualization_manager=visualization_manager
         )
 
-        # Use same attribute name as original
         self.vis_manager = visualization_manager
 
         # Initialize visualization manager's edge layers if they don't exist
@@ -51,7 +50,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
         # Initialize color cycle
         if not hasattr(self.vis_manager, '_color_cycle'):
-            self.vis_manager._color_cycle = np.random.RandomState(0)  # Use seeded random for reproducible colors
+            self.vis_manager._color_cycle = np.random.RandomState(0)
 
         self.params = EdgeAnalysisParams()
         self.analyzer = EdgeAnalyzer()
@@ -63,16 +62,15 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self._initialize_controls()
         self._setup_ui()
         self._connect_signals()
+
     def _connect_signals(self):
         # Parameter signals
         self.dilation_spin.valueChanged.connect(self.update_parameters)
         self.overlap_spin.valueChanged.connect(self.update_parameters)
         self.min_length_spin.valueChanged.connect(self.update_parameters)
         self.filter_isolated_check.stateChanged.connect(self.update_parameters)
-        self.temporal_window_spin.valueChanged.connect(self.update_parameters)
-        self.min_contact_spin.valueChanged.connect(self.update_parameters)
 
-        # Connect visualization signals (even though we'll primarily use direct calls)
+        # Connect visualization signals
         self.edges_detected.connect(self.vis_manager.update_edge_visualization)
         self.analysis_completed.connect(self.vis_manager.update_edge_analysis_visualization)
 
@@ -112,7 +110,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             self.vis_manager.update_edge_analysis_visualization(results)
 
             self.save_btn.setEnabled(True)
-            self.processing_completed.emit(results)  # Only emit this signal
+            self.processing_completed.emit(results)
 
             intercalation_count = sum(
                 len(edge.intercalations)
@@ -144,19 +142,15 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self.min_length_spin = QDoubleSpinBox()
         self.filter_isolated_check = QCheckBox()
 
-        # Temporal parameters
-        self.temporal_window_spin = QSpinBox()
-        self.min_contact_spin = QSpinBox()
-
         # Action buttons
         self.analyze_btn = QPushButton("Run Analysis")
         self.save_btn = QPushButton("Save Results")
         self.load_btn = QPushButton("Load Results")
         self.reset_btn = QPushButton("Reset Parameters")
 
-    def _create_detection_group(self) -> QGroupBox:
-        """Create edge detection parameters group"""
-        group = QGroupBox("Edge Detection Parameters")
+    def _create_parameters_group(self) -> QGroupBox:
+        """Create unified parameters group"""
+        group = QGroupBox("Parameters")
         layout = QFormLayout()
         layout.setSpacing(4)
 
@@ -184,40 +178,10 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self.filter_isolated_check.setToolTip("Filter out edges that don't connect to others")
         layout.addRow("Filter Isolated:", self.filter_isolated_check)
 
-        group_widget = QWidget()
-        group_widget.setLayout(layout)
+        # Add reset button at the bottom of parameters
+        layout.addRow(self.reset_btn)
 
-        group_layout = QVBoxLayout()
-        group_layout.addWidget(group_widget)
-        group.setLayout(group_layout)
-
-        return group
-
-    def _create_temporal_group(self) -> QGroupBox:
-        """Create temporal parameters group"""
-        group = QGroupBox("Temporal Parameters")
-        layout = QFormLayout()
-        layout.setSpacing(4)
-
-        # Configure temporal window control
-        self.temporal_window_spin.setRange(1, 10)
-        self.temporal_window_spin.setValue(self.params.temporal_window)
-        self.temporal_window_spin.setToolTip("Number of frames to consider for temporal analysis")
-        layout.addRow("Temporal Window:", self.temporal_window_spin)
-
-        # Configure contact frames control
-        self.min_contact_spin.setRange(1, 10)
-        self.min_contact_spin.setValue(self.params.min_contact_frames)
-        self.min_contact_spin.setToolTip("Minimum frames of contact required")
-        layout.addRow("Min Contact Frames:", self.min_contact_spin)
-
-        group_widget = QWidget()
-        group_widget.setLayout(layout)
-
-        group_layout = QVBoxLayout()
-        group_layout.addWidget(group_widget)
-        group.setLayout(group_layout)
-
+        group.setLayout(layout)
         return group
 
     def _create_action_group(self) -> QGroupBox:
@@ -229,7 +193,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         layout.addWidget(self.analyze_btn)
         layout.addWidget(self.save_btn)
         layout.addWidget(self.load_btn)
-        layout.addWidget(self.reset_btn)
 
         self.save_btn.setEnabled(False)
 
@@ -248,8 +211,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         right_layout.setContentsMargins(6, 6, 6, 6)
 
         # Create and add groups
-        right_layout.addWidget(self._create_detection_group())
-        right_layout.addWidget(self._create_temporal_group())
+        right_layout.addWidget(self._create_parameters_group())
         right_layout.addWidget(self._create_action_group())
 
         # Add status section
@@ -278,8 +240,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             self.overlap_spin,
             self.min_length_spin,
             self.filter_isolated_check,
-            self.temporal_window_spin,
-            self.min_contact_spin,
             self.analyze_btn,
             self.save_btn,
             self.load_btn,
@@ -294,9 +254,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 dilation_radius=self.dilation_spin.value(),
                 min_overlap_pixels=self.overlap_spin.value(),
                 min_edge_length=self.min_length_spin.value(),
-                filter_isolated=self.filter_isolated_check.isChecked(),
-                temporal_window=self.temporal_window_spin.value(),
-                min_contact_frames=self.min_contact_spin.value()
+                filter_isolated=self.filter_isolated_check.isChecked()
             )
             new_params.validate()
 
@@ -311,6 +269,32 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 message=f"Invalid parameters: {str(e)}",
                 component=self.__class__.__name__
             )
+
+    def reset_parameters(self):
+        """Reset all parameters to defaults simultaneously"""
+        default_params = EdgeAnalysisParams()
+
+        # Update UI controls without triggering individual signals
+        self.dilation_spin.blockSignals(True)
+        self.overlap_spin.blockSignals(True)
+        self.min_length_spin.blockSignals(True)
+        self.filter_isolated_check.blockSignals(True)
+
+        self.dilation_spin.setValue(default_params.dilation_radius)
+        self.overlap_spin.setValue(default_params.min_overlap_pixels)
+        self.min_length_spin.setValue(default_params.min_edge_length)
+        self.filter_isolated_check.setChecked(default_params.filter_isolated)
+
+        self.dilation_spin.blockSignals(False)
+        self.overlap_spin.blockSignals(False)
+        self.min_length_spin.blockSignals(False)
+        self.filter_isolated_check.blockSignals(False)
+
+        # Update parameters once at the end
+        self.params = default_params
+        self.analyzer.update_parameters(default_params)
+        self.parameters_updated.emit()
+        self._update_status("Parameters reset to defaults")
 
     def save_results(self):
         """Save the current analysis results"""
@@ -373,20 +357,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             ))
         finally:
             self._set_controls_enabled(True)
-
-    def reset_parameters(self):
-        """Reset all parameters to defaults"""
-        self.params = EdgeAnalysisParams()
-        self.analyzer.update_parameters(self.params)
-
-        self.dilation_spin.setValue(self.params.dilation_radius)
-        self.overlap_spin.setValue(self.params.min_overlap_pixels)
-        self.min_length_spin.setValue(self.params.min_edge_length)
-        self.filter_isolated_check.setChecked(self.params.filter_isolated)
-        self.temporal_window_spin.setValue(self.params.temporal_window)
-        self.min_contact_spin.setValue(self.params.min_contact_frames)
-
-        self._update_status("Parameters reset to defaults")
 
     def _extract_boundaries(self, results):
         """Extract cell boundaries from analysis results"""
