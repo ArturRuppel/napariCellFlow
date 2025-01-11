@@ -405,16 +405,17 @@ class SegmentationWidget(BaseAnalysisWidget):
             self._set_controls_enabled(False)
             self._update_status("Starting segmentation...", 0)
 
+            # Store the currently selected image layer
+            image_layer = self._get_active_image_layer()
+            if image_layer is None:
+                raise ProcessingError("No image layer selected")
+
             # Update model with current parameters
             current_params = self._get_current_parameters()
             self.segmentation.params = current_params
 
             if not self._ensure_model_initialized():
                 return
-
-            image_layer = self._get_active_image_layer()
-            if image_layer is None:
-                raise ProcessingError("No image layer selected")
 
             # Initialize data manager if needed
             if not self.data_manager._initialized:
@@ -445,6 +446,9 @@ class SegmentationWidget(BaseAnalysisWidget):
                 self.data_manager.segmentation_data = masks
                 self.visualization_manager.update_tracking_visualization(masks)
 
+            # Ensure the image layer stays selected
+            self.viewer.layers.selection.active = image_layer
+
             self._update_status("Segmentation completed", 100)
             self.segmentation_completed.emit(masks)
 
@@ -468,13 +472,17 @@ class SegmentationWidget(BaseAnalysisWidget):
             self._set_controls_enabled(False)
             self._update_status("Starting stack processing...", 0)
 
+            # Store the currently selected image layer
+            image_layer = self._get_active_image_layer()
+            if image_layer is None:
+                raise ProcessingError("No image layer selected")
+
             # Update model with current parameters
             current_params = self._get_current_parameters()
             self.segmentation.params = current_params
 
-            image_layer = self._get_active_image_layer()
-            if image_layer is None:
-                raise ProcessingError("No image layer selected")
+            if not self._ensure_model_initialized():
+                return
 
             if image_layer.data.ndim < 3:
                 raise ProcessingError("Selected layer is not a stack")
@@ -508,6 +516,9 @@ class SegmentationWidget(BaseAnalysisWidget):
             self._update_status("Updating visualization...", 95)
             self.data_manager.segmentation_data = masks_stack
             self.visualization_manager.update_tracking_visualization(masks_stack)
+
+            # Ensure the image layer stays selected
+            self.viewer.layers.selection.active = image_layer
 
             self._update_status("Stack processing complete", 100)
             self.segmentation_completed.emit(masks_stack)
@@ -632,7 +643,13 @@ class SegmentationWidget(BaseAnalysisWidget):
 
     def export_to_cellpose(self):
         """Export current segmentation for Cellpose GUI editing"""
+        if getattr(self, '_processing', False):
+            return
+
         try:
+            self._processing = True
+            self._set_controls_enabled(False)
+
             if self.data_manager.segmentation_data is None:
                 raise ProcessingError("No segmentation data available")
 
@@ -661,23 +678,15 @@ class SegmentationWidget(BaseAnalysisWidget):
 
             # Export frames
             import tifffile
+            total_frames = len(image_layer.data)
 
-            progress = QProgressDialog(
-                "Exporting segmentation data...",
-                "Cancel",
-                0,
-                len(image_layer.data),
-                self
-            )
-            progress.setWindowModality(Qt.WindowModal)
+            self._update_status("Starting export...", 0)
 
             try:
-                for i in range(len(image_layer.data)):
-                    if progress.wasCanceled():
-                        raise ProcessingError("Export cancelled by user")
-
-                    progress.setValue(i)
-                    progress.setLabelText(f"Exporting frame {i + 1}/{len(image_layer.data)}")
+                for i in range(total_frames):
+                    # Calculate progress percentage (0-95% range for export)
+                    progress = int(95 * i / total_frames)
+                    self._update_status(f"Exporting frame {i + 1}/{total_frames}", progress)
 
                     # Get current image and masks
                     current_image = image_layer.data[i]
@@ -715,8 +724,10 @@ class SegmentationWidget(BaseAnalysisWidget):
                 self._last_export_dir = save_dir
                 self.import_btn.setEnabled(True)
 
-            finally:
-                progress.close()
+                self._update_status("Export completed successfully", 100)
+
+            except Exception as e:
+                raise ProcessingError("Export operation failed", str(e))
 
         except Exception as e:
             self._handle_error(ProcessingError(
@@ -724,6 +735,9 @@ class SegmentationWidget(BaseAnalysisWidget):
                 str(e),
                 self.__class__.__name__
             ))
+        finally:
+            self._processing = False
+            self._set_controls_enabled(True)
 
     def cleanup(self):
         """Clean up resources"""
