@@ -63,6 +63,43 @@ class PreprocessingWidget(BaseAnalysisWidget):
         # Initial UI state update
         self._update_ui_state()
 
+    def _setup_ui(self):
+        """Initialize the user interface"""
+        # Create right side container
+        right_container = QWidget()
+        right_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        right_container.setFixedWidth(350)
+
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(8)
+        right_layout.setContentsMargins(6, 6, 6, 6)
+
+        # Create and add groups
+        right_layout.addWidget(self._create_intensity_group())
+        right_layout.addWidget(self._create_filter_group())
+
+        # Add preprocess button
+        right_layout.addWidget(self.preprocess_btn)
+
+        # Add status section
+        status_layout = QVBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        status_layout.addWidget(self.progress_bar)
+        status_layout.addWidget(self.status_label)
+        right_layout.addLayout(status_layout)
+
+        right_layout.addStretch()
+        right_container.setLayout(right_layout)
+
+        # Add to the main layout
+        self.main_layout.addWidget(right_container)
+        self.main_layout.addStretch(1)
+
+        # Register controls
+        self._register_controls()
+
     def _update_ui_state(self, event=None):
         """Update UI based on current state"""
         active_layer = self._get_active_image_layer()
@@ -136,27 +173,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
             self.preview_layer = None
             raise ProcessingError("Preview failed", str(e))
 
-    def _handle_layer_removal(self, event):
-        """Handle layer removal events"""
-        removed_layer = event.value
-
-        if removed_layer == self.preview_layer:
-            logger.debug("Preview layer was removed")
-            self.preview_layer = None
-            self.preview_enabled = False
-            self.preview_check.setChecked(False)
-
-        if removed_layer == self.original_layer:
-            logger.debug("Original layer was removed")
-            self.original_layer = None
-            if self.preview_layer is not None:
-                self.viewer.layers.remove(self.preview_layer)
-                self.preview_layer = None
-            self.preview_enabled = False
-            self.preview_check.setChecked(False)
-
-        # Update UI state
-        self._update_ui_state()
     def _initialize_controls(self):
         """Initialize all UI controls"""
         # Intensity controls
@@ -182,11 +198,34 @@ class PreprocessingWidget(BaseAnalysisWidget):
         self.clahe_grid_slider = QSlider(Qt.Horizontal)
 
         # Preview control
-        self.preview_check = QCheckBox("Show Preview")
+        self.preview_check = QCheckBox("")
 
         # Action buttons
         self.preprocess_btn = QPushButton("Run Preprocessing")
         self.reset_btn = QPushButton("Reset Parameters")
+
+    def _create_filter_group(self) -> QGroupBox:
+        """Create parameters group with all controls"""
+        group = QGroupBox("Parameters")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+
+        # Create form layout for parameters
+        form_layout = QFormLayout()
+        form_layout.setSpacing(4)
+
+        # Create filter controls
+        self._create_filter_controls(form_layout)
+
+        # Add form layout to main layout
+        layout.addLayout(form_layout)
+
+        # Add reset button spanning full width
+        layout.addSpacing(8)  # Add some space before the reset button
+        layout.addWidget(self.reset_btn)
+
+        group.setLayout(layout)
+        return group
 
     def _create_intensity_group(self) -> QGroupBox:
         """Create intensity range controls group"""
@@ -210,79 +249,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
 
         group.setLayout(layout)
         return group
-
-    def _create_filter_group(self) -> QGroupBox:
-        """Create filter parameters group"""
-        group = QGroupBox("Filter Parameters")
-        layout = QFormLayout()
-        layout.setSpacing(4)
-
-        # Create filter controls using the existing method
-        self._create_filter_controls(layout)
-
-        group_widget = QWidget()
-        group_widget.setLayout(layout)
-
-        group_layout = QVBoxLayout()
-        group_layout.addWidget(group_widget)
-        group.setLayout(group_layout)
-
-        return group
-
-    def _create_preview_group(self) -> QGroupBox:
-        """Create preview controls group"""
-        group = QGroupBox("Preview")
-        layout = QHBoxLayout()
-        layout.addWidget(self.preview_check)
-        layout.addStretch()
-        group.setLayout(layout)
-        return group
-
-    def _create_action_group(self) -> QGroupBox:
-        """Create action buttons group"""
-        group = QGroupBox("Actions")
-        layout = QVBoxLayout()
-        layout.setSpacing(4)
-        layout.addWidget(self.reset_btn)
-        layout.addWidget(self.preprocess_btn)
-        group.setLayout(layout)
-        return group
-
-    def _setup_ui(self):
-        """Initialize the user interface"""
-        # Create right side container
-        right_container = QWidget()
-        right_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        right_container.setFixedWidth(350)
-
-        right_layout = QVBoxLayout()
-        right_layout.setSpacing(8)
-        right_layout.setContentsMargins(6, 6, 6, 6)
-
-        # Create and add groups
-        right_layout.addWidget(self._create_intensity_group())
-        right_layout.addWidget(self._create_filter_group())
-        right_layout.addWidget(self._create_preview_group())
-        right_layout.addWidget(self._create_action_group())
-
-        # Add status section
-        status_layout = QVBoxLayout()
-        self.progress_bar = QProgressBar()
-        self.status_label = QLabel("")
-        self.status_label.setWordWrap(True)
-        status_layout.addWidget(self.progress_bar)
-        status_layout.addWidget(self.status_label)
-        right_layout.addLayout(status_layout)
-
-        right_layout.addStretch()
-        right_container.setLayout(right_layout)
-
-        # Add to the main layout
-        self.main_layout.addWidget(right_container)
-        self.main_layout.addStretch(1)
-
-        # Register controls
-        self._register_controls()
 
     def _create_filter_controls(self, form_layout: QFormLayout):
         """Create filter parameter controls"""
@@ -352,6 +318,15 @@ class PreprocessingWidget(BaseAnalysisWidget):
             "CLAHE Grid Size", 1, 64, 16, checkbox=False
         )
 
+        # Add preview checkbox in the same style as other checkboxes
+        preview_layout = QHBoxLayout()
+        self.preview_check.setText("")
+        self.preview_check.setFixedWidth(30)
+        preview_layout.addWidget(self.preview_check)
+        preview_label = QLabel("Show Preview")
+        preview_layout.addWidget(preview_label)
+        preview_layout.addStretch()
+        form_layout.addRow("Preview:", preview_layout)
     def _register_controls(self):
         """Register all controls with base widget"""
         for control in [
@@ -662,6 +637,7 @@ class PreprocessingWidget(BaseAnalysisWidget):
             ))
         finally:
             self._set_controls_enabled(True)
+
     def cleanup(self):
         """Clean up resources"""
         if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
