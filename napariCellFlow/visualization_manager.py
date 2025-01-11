@@ -16,6 +16,8 @@ from .structure import CellBoundary, IntercalationEvent
 logger = logging.getLogger(__name__)
 
 
+
+
 class VisualizationManager(ErrorHandlingMixin):
     """Manages visualization of cell tracking results in napari."""
 
@@ -152,46 +154,6 @@ class VisualizationManager(ErrorHandlingMixin):
                         details=str(e),
                         severity=ErrorSeverity.WARNING
                     ))
-
-    def validate_stack_consistency(self) -> bool:
-        """Validate visualization state consistency with detailed error reporting."""
-        try:
-            if self.tracking_layer is None:
-                return True
-
-            if self._current_dims is not None:
-                if self.tracking_layer.data.shape != self._current_dims:
-                    self.handle_error(self.create_error(
-                        message="Visualization shape mismatch",
-                        details=f"Expected {self._current_dims}, got {self.tracking_layer.data.shape}",
-                        severity=ErrorSeverity.WARNING,
-                        recovery_hint="Data may not be displayed correctly"
-                    ))
-                    return False
-
-            if self.data_manager is not None and self.data_manager.segmentation_data is not None:
-                stack_shape = self.data_manager.segmentation_data.shape
-                visualization_shape = self.tracking_layer.data.shape
-
-                if stack_shape != visualization_shape:
-                    self.handle_error(self.create_error(
-                        message="Stack shape mismatch",
-                        details=f"DataManager={stack_shape}, Visualization={visualization_shape}",
-                        severity=ErrorSeverity.WARNING,
-                        recovery_hint="Visualization may be out of sync with data"
-                    ))
-                    return False
-
-            return True
-
-        except Exception as e:
-            self.handle_error(self.create_error(
-                message="Failed to validate stack consistency",
-                details=str(e),
-                severity=ErrorSeverity.ERROR,
-                original_error=e
-            ))
-            return False
 
     def _update_existing_stack(self, frame_data: np.ndarray, frame_index: int, num_frames: int) -> np.ndarray:
         """Update existing stack with new frame data."""
@@ -350,32 +312,6 @@ class VisualizationManager(ErrorHandlingMixin):
         """Allow setting the data manager after initialization."""
         self.data_manager = data_manager
 
-    def _setup_layer_transforms(self, layer: "napari.layers.Layer", data_shape: Tuple[int, ...]) -> None:
-        """Set up proper transforms for the layer based on data dimensions."""
-        ndim = len(data_shape)
-        scale = np.ones(ndim)
-        translate = np.zeros(ndim)
-
-        affine_matrix = np.eye(ndim + 1)
-        affine_matrix[:-1, :-1] = np.diag(scale)
-        affine_matrix[:-1, -1] = translate
-
-        transform = Affine(affine_matrix=affine_matrix)
-        layer.affine = transform
-
-    def get_current_frame(self) -> Optional[np.ndarray]:
-        """Get the data for the current frame."""
-        if self.tracking_layer is None:
-            return None
-
-        current_step = int(self.viewer.dims.point[0])
-        return self.tracking_layer.data[current_step]
-
-    def set_layer_visibility(self, visible: bool) -> None:
-        """Set the visibility of the tracking layer."""
-        if self.tracking_layer is not None:
-            self.tracking_layer.visible = visible
-
     def cleanup(self) -> None:
         """Clean up resources when closing."""
         self.clear_visualization()
@@ -509,6 +445,7 @@ class VisualizationManager(ErrorHandlingMixin):
         except Exception as e:
             logger.error(f"Error updating intercalation visualization: {e}")
             raise
+
     def update_edge_visualization(self, boundaries_by_frame: Dict[int, List[CellBoundary]]) -> None:
         """Update initial edge detection visualization"""
         try:
@@ -571,18 +508,6 @@ class VisualizationManager(ErrorHandlingMixin):
         self._intercalation_layer = None
         self._analysis_layer = None
 
-    def generate_distinct_colors(self, n: int) -> List[tuple]:
-        """Generate n visually distinct colors"""
-        colors = []
-        for i in range(n):
-            hue = i / n
-            saturation = 0.8 + (i % 3) * 0.1  # Vary saturation slightly
-            value = 0.9
-            rgb = colorsys.hsv_to_rgb(hue, saturation, value)
-            colors.append((*rgb, 1.0))  # Add alpha channel
-        return colors
-
-
     @property
     def tracked_layer(self) -> Optional[Labels]:
         """The current tracked cells layer"""
@@ -597,5 +522,3 @@ class VisualizationManager(ErrorHandlingMixin):
     def analysis_layer(self) -> Optional[Points]:
         """The current edge analysis layer"""
         return self._analysis_layer
-
-

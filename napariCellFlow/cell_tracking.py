@@ -123,13 +123,7 @@ class CellTracker:
             )
 
             # Process remaining unassigned regions
-            self._process_frame_regions_optimized(
-                next_frame,
-                tracked_segmentation[t + 1],
-                overlap_matrix,
-                assigned_ids,
-                all_used_ids
-            )
+            self._process_frame_regions(next_frame, tracked_segmentation[t + 1], overlap_matrix, assigned_ids, all_used_ids)
 
             # Apply any future assignments for this frame
             if t + 1 in future_assignments:
@@ -258,7 +252,7 @@ class CellTracker:
         self._region_cache[cache_key] = regions
         return regions
 
-    def _process_frame_regions_optimized(
+    def _process_frame_regions(
             self,
             current_frame: np.ndarray,
             output_frame: np.ndarray,
@@ -371,43 +365,7 @@ class CellTracker:
 
         return overlap_matrix
 
-    def _process_frame_regions(
-            self,
-            current_frame: np.ndarray,
-            output_frame: np.ndarray,
-            overlap_matrix: Dict[int, List[Tuple[int, int, float]]],
-            assigned_ids: Set[int],
-            all_used_ids: Set[int]
-    ) -> None:
-        """Optimized region processing using vectorized operations"""
-        # Get unique labels once
-        next_labels = np.unique(current_frame)
-        next_labels = next_labels[next_labels > 0]
 
-        processed_ids = set()
-
-        # Process matched cells
-        for current_id, candidates in overlap_matrix.items():
-            for next_id, _, score in candidates:  # Changed to explicitly use score
-                if next_id not in assigned_ids:
-                    output_frame[current_frame == next_id] = current_id
-                    assigned_ids.add(next_id)
-                    processed_ids.add(current_id)
-                    break
-
-        # Process unmatched cells
-        unmatched_mask = ~np.isin(current_frame, list(assigned_ids))
-        unmatched_labels = np.unique(current_frame[unmatched_mask])
-        unmatched_labels = unmatched_labels[unmatched_labels > 0]
-
-        if len(unmatched_labels) > 0:
-            start_id = max(all_used_ids) + 1 if all_used_ids else 1
-            new_ids = np.arange(start_id, start_id + len(unmatched_labels))
-
-            for new_id, label in zip(new_ids, unmatched_labels):
-                output_frame[current_frame == label] = new_id
-                all_used_ids.add(new_id)
-                assigned_ids.add(label)
 
 
 if __name__ == "__main__":
