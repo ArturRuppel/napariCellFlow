@@ -76,10 +76,8 @@ import numpy as np
 import pytest
 from qtpy.QtWidgets import QWidget
 
-from napariCellFlow.data_manager import DataManager
 from napariCellFlow.segmentation import SegmentationHandler
 from napariCellFlow.segmentation import SegmentationParameters
-from napariCellFlow.visualization_manager import VisualizationManager
 
 
 def create_test_image(size=64):
