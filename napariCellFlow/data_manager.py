@@ -1,4 +1,5 @@
 import logging
+import pickle
 from pathlib import Path
 from typing import Optional, Tuple, Union, Dict, List
 from threading import Lock
@@ -23,6 +24,20 @@ class DataManager:
         self._num_frames = None
         self._frame_states = {}  # Track state of individual frames
         self._initialized = False
+        self.last_directory = None
+
+    @property
+    def last_directory(self) -> Optional[Path]:
+        """Get the last used directory."""
+        return self._last_directory
+
+    @last_directory.setter
+    def last_directory(self, path: Optional[Union[str, Path]]):
+        """Set the last used directory."""
+        if path is not None:
+            self._last_directory = Path(path)
+        else:
+            self._last_directory = None
 
     @property
     def analysis_results(self) -> Optional['EdgeAnalysisResults']:
@@ -68,6 +83,66 @@ class DataManager:
             results.update_metadata('frame_ids', sorted(boundaries_by_frame.keys()))
 
         self.analysis_results = results
+
+    def save_analysis_results(self, file_path: Union[str, Path]) -> None:
+        """
+        Save the current analysis results to a pickle file.
+
+        Args:
+            file_path: Path to save the results to
+
+        Raises:
+            ValueError: If no results exist or path is invalid
+            IOError: If saving fails
+        """
+        if self._analysis_results is None:
+            raise ValueError("No analysis results to save")
+
+        file_path = Path(file_path)
+
+        try:
+            with file_path.open('wb') as f:
+                pickle.dump(self._analysis_results, f)
+            logger.info(f"Analysis results saved to {file_path}")
+            self.last_directory = Path(file_path).parent
+
+        except Exception as e:
+            logger.error(f"Failed to save analysis results: {e}")
+            raise IOError(f"Failed to save results: {str(e)}")
+
+    def load_analysis_results(self, file_path: Union[str, Path]) -> None:
+        """
+        Load analysis results from a pickle file.
+
+        Args:
+            file_path: Path to load the results from
+
+        Raises:
+            ValueError: If path is invalid or file format is incorrect
+            IOError: If loading fails
+        """
+        file_path = Path(file_path)
+        self.last_directory = Path(file_path).parent
+
+        if not file_path.exists():
+            raise ValueError(f"File not found: {file_path}")
+
+        try:
+            with file_path.open('rb') as f:
+                loaded_data = pickle.load(f)
+
+            # Validate loaded data
+            if not isinstance(loaded_data, EdgeAnalysisResults):
+                raise ValueError(
+                    f"Invalid file format: expected EdgeAnalysisResults, got {type(loaded_data)}"
+                )
+
+            self._analysis_results = loaded_data
+            logger.info(f"Analysis results loaded from {file_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to load analysis results: {e}")
+            raise IOError(f"Failed to load results: {str(e)}")
 
     def initialize_stack(self, num_frames: int) -> None:
         """Initialize the stack with proper dimensionality and frame tracking."""

@@ -296,62 +296,124 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self.parameters_updated.emit()
         self._update_status("Parameters reset to defaults")
 
-    def save_results(self):
-        """Save the current analysis results"""
-        try:
-            if self.data_manager.analysis_results is None:
-                QMessageBox.warning(self, "Warning", "No analysis results to save")
-                return
-
-            file_path = self._get_save_path()
-            if file_path:
-                self.data_manager.save_analysis_results(file_path)
-                self._update_status(f"Results saved to {file_path.name}", 100)
-
-        except Exception as e:
-            error_msg = f"Failed to save results: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            QMessageBox.critical(self, "Error", error_msg)
-            self._update_status("Saving failed", 0)
-
     def load_results(self):
         """Load previously saved analysis results"""
         try:
-            self._set_controls_enabled(False)
-
             file_path = self._get_load_path()
             if file_path is None:
                 return
 
+            if not file_path.exists():
+                raise ProcessingError(
+                    message="File not found",
+                    details=str(file_path),
+                    component=self.__class__.__name__
+                )
+
+            self._set_controls_enabled(False)
             self._update_status("Loading analysis results...", 20)
 
             # Clear previous visualizations
-            self.visualization_manager.clear_edge_layers()
+            self.vis_manager.clear_edge_layers()
 
-            # Load through data manager
+            # Load and validate data
             self.data_manager.load_analysis_results(file_path)
             loaded_data = self.data_manager.analysis_results
+
+            if loaded_data is None:
+                raise ProcessingError(
+                    message="No valid analysis results found in file",
+                    component=self.__class__.__name__
+                )
+
+            # Validate essential attributes
+            if not hasattr(loaded_data, 'edges') or not loaded_data.edges:
+                raise ProcessingError(
+                    message="Invalid analysis results: missing edge data",
+                    component=self.__class__.__name__
+                )
+
+            # Store current results
             self._current_results = loaded_data
 
-            # Extract boundaries
+            # Extract and validate boundaries
             boundaries_by_frame = self._extract_boundaries(loaded_data)
+            if not boundaries_by_frame:
+                raise ProcessingError(
+                    message="No valid boundary data found in results",
+                    component=self.__class__.__name__
+                )
             self._current_boundaries = boundaries_by_frame
 
             # Update visualizations
-            self.visualization_manager.update_edge_visualization(boundaries_by_frame)
-            self.visualization_manager.update_intercalation_visualization(loaded_data)
-            self.visualization_manager.update_edge_analysis_visualization(loaded_data)
+            self._update_status("Updating visualizations...", 60)
+            self.vis_manager.update_edge_visualization(boundaries_by_frame)
+            self.vis_manager.update_intercalation_visualization(loaded_data)
+            self.vis_manager.update_edge_analysis_visualization(loaded_data)
 
-            self._update_status("Analysis results loaded", 100)
+            # Enable relevant controls
             self.save_btn.setEnabled(True)
 
-            # Emit signals
+            # Emit signals for other components
             self.edges_detected.emit(boundaries_by_frame)
-            self.processing_completed.emit(loaded_data)
+            self.analysis_completed.emit(loaded_data)
+
+            self._update_status(
+                f"Loaded analysis results from {file_path.name} "
+                f"({len(loaded_data.edges)} edges)",
+                100
+            )
 
         except Exception as e:
+            if isinstance(e, ProcessingError):
+                self._handle_error(e)  # Pass through existing ProcessingErrors
+            else:
+                # Use base widget's error handling
+                self._handle_error(ProcessingError(
+                    message="Failed to load results",
+                    details=str(e),
+                    component=self.__class__.__name__
+                ))
+        finally:
+            self._set_controls_enabled(True)
+
+    def save_results(self):
+        """Save the current analysis results"""
+        try:
+            # Validate we have results to save
+            if self._current_results is None:
+                QMessageBox.warning(
+                    self,
+                    "Warning",
+                    "No analysis results to save. Please run analysis first."
+                )
+                return
+
+            # Get save path
+            file_path = self._get_save_path()
+            if file_path is None:
+                return
+
+            self._set_controls_enabled(False)
+            self._update_status("Saving analysis results...", 20)
+
+            # Ensure file has .pkl extension
+            if file_path.suffix.lower() != '.pkl':
+                file_path = file_path.with_suffix('.pkl')
+
+            # Save results
+            self.data_manager.save_analysis_results(file_path)
+
+            self._update_status(
+                f"Results saved to {file_path.name} "
+                f"({len(self._current_results.edges)} edges)",
+                100
+            )
+
+        except Exception as e:
+            # Use base widget's error handling
             self._handle_error(ProcessingError(
-                message="Failed to load results",
+                message="Failed to save results",
                 details=str(e),
                 component=self.__class__.__name__
             ))

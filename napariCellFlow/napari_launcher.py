@@ -45,13 +45,13 @@ def create_viewer_with_widget():
         logger.debug("Created napari viewer")
 
         # Get the widget class
-        CellposeStackmodeWidget = setup_debug_environment()
+        napariCellFlow = setup_debug_environment()
 
         # Create and add the widget
-        widget = CellposeStackmodeWidget(viewer)
+        widget = napariCellFlow(viewer)
         dock_widget = viewer.window.add_dock_widget(
             widget,
-            name="Cellpose Stackmode",
+            name="napariCellFlow",
             area='right'
         )
         logger.debug("Added widget to viewer")
