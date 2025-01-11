@@ -63,6 +63,236 @@ class PreprocessingWidget(BaseAnalysisWidget):
         # Initial UI state update
         self._update_ui_state()
 
+    def _connect_signals(self):
+        """Connect widget signals"""
+        self.preprocess_btn.clicked.connect(self.run_preprocessing)
+        self.reset_btn.clicked.connect(self.reset_parameters)
+
+        # Intensity range
+        self.intensity_slider.valueChanged.connect(self._update_from_intensity_slider)
+        self.min_spin.valueChanged.connect(self._update_from_intensity_spinboxes)
+        self.max_spin.valueChanged.connect(self._update_from_intensity_spinboxes)
+
+        def connect_slider_spin(slider, spinbox, scale_factor=1.0, odd_only=False):
+            def update_from_slider(value):
+                spinbox.blockSignals(True)
+                if odd_only:
+                    if value == 0:
+                        spinbox.setValue(0)
+                    else:
+                        actual_value = 1 + (value * 2)  # Start from 3,5,7,... for non-zero values
+                        spinbox.setValue(actual_value)
+                else:
+                    spinbox.setValue(value * scale_factor)
+                spinbox.blockSignals(False)
+                self.update_parameters()
+
+            def update_from_spin(value):
+                slider.blockSignals(True)
+                if odd_only:
+                    if value == 0:
+                        slider.setValue(0)
+                    else:
+                        slider_value = (value - 1) // 2  # Convert back to slider value
+                        slider.setValue(slider_value)
+                else:
+                    slider.setValue(int(value / scale_factor))
+                slider.blockSignals(False)
+                self.update_parameters()
+
+            slider.valueChanged.connect(update_from_slider)
+            spinbox.valueChanged.connect(update_from_spin)
+
+        # Connect parameter controls
+        connect_slider_spin(self.median_slider, self.median_size_spin, odd_only=True)
+        connect_slider_spin(self.gaussian_slider, self.gaussian_sigma_spin, 0.1)
+        connect_slider_spin(self.clahe_clip_slider, self.clahe_clip_spin, 0.1)
+        connect_slider_spin(self.clahe_grid_slider, self.clahe_grid_spin)
+
+        # Preview
+        self.preview_check.toggled.connect(self.toggle_preview)
+
+        # Viewer dims change
+        if self.viewer is not None:
+            self.viewer.dims.events.current_step.connect(self.update_preview_frame)
+
+    def _create_filter_controls(self, form_layout: QFormLayout):
+        """Create filter parameter controls"""
+        # Add tooltip about disabling filters
+        tooltip_label = QLabel("Note: Set parameter to 0 to disable a filter")
+        tooltip_label.setStyleSheet("color: gray; font-style: italic;")
+        form_layout.addRow(tooltip_label)
+        form_layout.addRow(QLabel(""))  # Add some spacing
+
+        def create_parameter_group(
+                label: str,
+                min_val: float,
+                max_val: float,
+                default_val: float,
+                step: float = 1.0,
+                double: bool = False,
+                odd_only: bool = False
+        ):
+            control_layout = QHBoxLayout()
+
+            spin = QDoubleSpinBox() if double else QSpinBox()
+            spin.setRange(0, max_val)
+            spin.setValue(default_val)
+            spin.setSingleStep(step if not odd_only else 2)
+            spin.setFixedWidth(80)
+            if double:
+                spin.setDecimals(1)
+            control_layout.addWidget(spin)
+
+            slider = QSlider(Qt.Horizontal)
+            if odd_only:
+                # For median filter, allow full range including 0
+                slider_range = ((max_val - 1) // 2)  # Convert max value to slider steps
+                slider.setRange(0, slider_range)
+                if default_val == 0:
+                    slider.setValue(0)
+                else:
+                    slider.setValue((default_val - 1) // 2)
+            else:
+                slider.setRange(0, int(max_val * (1 / step)))
+                slider.setValue(int(default_val * (1 / step)))
+            control_layout.addWidget(slider, stretch=1)
+
+            form_layout.addRow(label + ":", control_layout)
+            return spin, slider
+
+        # Create controls with corrected ranges
+        self.median_size_spin, self.median_slider = create_parameter_group(
+            "Median Filter Size", 3, 15, 0, step=2, odd_only=True
+        )
+
+        self.gaussian_sigma_spin, self.gaussian_slider = create_parameter_group(
+            "Gaussian Sigma", 0.1, 10.0, 0, step=0.1, double=True
+        )
+
+        self.clahe_clip_spin, self.clahe_clip_slider = create_parameter_group(
+            "CLAHE Clip Limit", 0.1, 100.0, 0, step=0.1, double=True
+        )
+
+        self.clahe_grid_spin, self.clahe_grid_slider = create_parameter_group(
+            "CLAHE Grid Size", 1, 64, 16
+        )
+
+        # Add preview checkbox
+        preview_layout = QHBoxLayout()
+        self.preview_check.setText("")
+        self.preview_check.setFixedWidth(30)
+        preview_layout.addWidget(self.preview_check)
+        preview_label = QLabel("")
+        preview_layout.addWidget(preview_label)
+        preview_layout.addStretch()
+        form_layout.addRow("Show Preview:", preview_layout)
+
+    def update_parameters(self):
+        """Update preprocessing parameters from UI controls"""
+        try:
+            # Get values from controls
+            median_size = self.median_size_spin.value()
+            gaussian_sigma = self.gaussian_sigma_spin.value()
+            clahe_clip = self.clahe_clip_spin.value()
+            clahe_grid = self.clahe_grid_spin.value()
+
+            # Create parameters with appropriate enabled states and valid values
+            params = PreprocessingParameters(
+                min_intensity=self.current_min_intensity,
+                max_intensity=self.current_max_intensity,
+
+                # For median filter: if size is 0, disable and use minimum valid size
+                enable_median_filter=median_size > 0,
+                median_filter_size=max(3, median_size) if median_size > 0 else 3,
+
+                # For Gaussian: if sigma is 0, disable and use minimum valid sigma
+                enable_gaussian_filter=gaussian_sigma > 0,
+                gaussian_sigma=max(0.1, gaussian_sigma) if gaussian_sigma > 0 else 0.1,
+
+                # For CLAHE: if either clip limit or grid size is 0, disable the filter
+                enable_clahe=(clahe_clip > 0 and clahe_grid > 0),
+                clahe_clip_limit=max(0.1, clahe_clip) if clahe_clip > 0 else 0.1,
+                clahe_grid_size=max(1, clahe_grid) if clahe_grid > 0 else 1
+            )
+
+            params.validate()
+            self.preprocessor.update_parameters(params)
+
+            self._update_status("Parameters updated")
+            self.parameters_updated.emit()
+
+            if self.preview_enabled:
+                self.update_preview_frame()
+
+        except ValueError as e:
+            raise ProcessingError("Invalid parameters", str(e))
+
+    def reset_parameters(self):
+        """Reset all parameters to defaults"""
+        # Reset intensity range
+        self.intensity_slider.setValue((0, 255))
+        self.min_spin.setValue(0)
+        self.max_spin.setValue(255)
+        self.current_min_intensity = 0
+        self.current_max_intensity = 255
+
+        # Reset filters to disabled state (0)
+        self.median_size_spin.setValue(0)
+        self.median_slider.setValue(0)
+
+        self.gaussian_sigma_spin.setValue(0)
+        self.gaussian_slider.setValue(0)
+
+        self.clahe_clip_spin.setValue(0)
+        self.clahe_clip_slider.setValue(0)
+        self.clahe_grid_spin.setValue(16)  # Keep a valid grid size even when CLAHE is disabled
+        self.clahe_grid_slider.setValue(16)
+
+        self._update_status("Parameters reset to defaults")
+        self.update_parameters()
+
+    def _register_controls(self):
+        """Register all controls with base widget"""
+        for control in [
+            self.intensity_slider, self.min_spin, self.max_spin,
+            self.median_size_spin, self.median_slider,
+            self.gaussian_sigma_spin, self.gaussian_slider,
+            self.clahe_clip_spin, self.clahe_clip_slider,
+            self.clahe_grid_spin, self.clahe_grid_slider,
+            self.preview_check,
+            self.preprocess_btn,
+            self.reset_btn
+        ]:
+            self.register_control(control)
+
+    def _initialize_controls(self):
+        """Initialize all UI controls"""
+        # Intensity controls
+        self.intensity_slider = QRangeSlider(Qt.Horizontal)
+        self.min_spin = QSpinBox()
+        self.max_spin = QSpinBox()
+
+        # Filter controls
+        self.median_size_spin = QSpinBox()
+        self.median_slider = QSlider(Qt.Horizontal)
+
+        self.gaussian_sigma_spin = QDoubleSpinBox()
+        self.gaussian_slider = QSlider(Qt.Horizontal)
+
+        self.clahe_clip_spin = QDoubleSpinBox()
+        self.clahe_clip_slider = QSlider(Qt.Horizontal)
+        self.clahe_grid_spin = QSpinBox()
+        self.clahe_grid_slider = QSlider(Qt.Horizontal)
+
+        # Preview control
+        self.preview_check = QCheckBox("")
+
+        # Action buttons
+        self.preprocess_btn = QPushButton("Run Preprocessing")
+        self.reset_btn = QPushButton("Reset Parameters")
+
+
     def _setup_ui(self):
         """Initialize the user interface"""
         # Create right side container
@@ -183,36 +413,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
             self.preview_layer = None
             self.original_layer = None  # Clear the original layer reference on error
             raise ProcessingError("Preview failed", str(e))
-    def _initialize_controls(self):
-        """Initialize all UI controls"""
-        # Intensity controls
-        self.intensity_slider = QRangeSlider(Qt.Horizontal)
-        self.min_spin = QSpinBox()
-        self.max_spin = QSpinBox()
-
-        # Median filter controls
-        self.median_check = QCheckBox()
-        self.median_size_spin = QSpinBox()
-        self.median_slider = QSlider(Qt.Horizontal)
-
-        # Gaussian filter controls
-        self.gaussian_check = QCheckBox()
-        self.gaussian_sigma_spin = QDoubleSpinBox()
-        self.gaussian_slider = QSlider(Qt.Horizontal)
-
-        # CLAHE controls
-        self.clahe_check = QCheckBox()
-        self.clahe_clip_spin = QDoubleSpinBox()
-        self.clahe_clip_slider = QSlider(Qt.Horizontal)
-        self.clahe_grid_spin = QSpinBox()
-        self.clahe_grid_slider = QSlider(Qt.Horizontal)
-
-        # Preview control
-        self.preview_check = QCheckBox("")
-
-        # Action buttons
-        self.preprocess_btn = QPushButton("Run Preprocessing")
-        self.reset_btn = QPushButton("Reset Parameters")
 
     def _create_filter_group(self) -> QGroupBox:
         """Create parameters group with all controls"""
@@ -273,152 +473,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
         layout.addLayout(spin_layout)
         group.setLayout(layout)
         return group
-    def _create_filter_controls(self, form_layout: QFormLayout):
-        """Create filter parameter controls"""
-
-        def create_parameter_group(
-                label: str,
-                min_val: float,
-                max_val: float,
-                default_val: float,
-                step: float = 1.0,
-                checkbox: bool = True,
-                double: bool = False,
-                odd_only: bool = False
-        ):
-            control_layout = QHBoxLayout()
-
-            if checkbox:
-                check = QCheckBox("")
-                check.setFixedWidth(30)
-                control_layout.addWidget(check)
-            else:
-                check = None
-                spacer = QWidget()
-                spacer.setFixedWidth(30)
-                control_layout.addWidget(spacer)
-
-            spin = QDoubleSpinBox() if double else QSpinBox()
-            spin.setRange(min_val, max_val)
-            spin.setValue(default_val)
-            spin.setSingleStep(step if not odd_only else 2)
-            spin.setFixedWidth(80)
-            if double:
-                spin.setDecimals(1)
-            if checkbox:
-                spin.setEnabled(False)
-            control_layout.addWidget(spin)
-
-            slider = QSlider(Qt.Horizontal)
-            if odd_only:
-                slider_range = int((max_val - min_val) / 2)
-                slider.setRange(0, slider_range)
-                slider.setValue(int((default_val - min_val) / 2))
-            else:
-                slider.setRange(int(min_val * (1 / step)), int(max_val * (1 / step)))
-                slider.setValue(int(default_val * (1 / step)))
-            if checkbox:
-                slider.setEnabled(False)
-            control_layout.addWidget(slider, stretch=1)
-
-            form_layout.addRow(label + ":", control_layout)
-            return check, spin, slider
-
-        # Create controls
-        self.median_check, self.median_size_spin, self.median_slider = create_parameter_group(
-            "Median Filter", 3, 15, 3, step=2, odd_only=True
-        )
-
-        self.gaussian_check, self.gaussian_sigma_spin, self.gaussian_slider = create_parameter_group(
-            "Gaussian Filter", 0.1, 10.0, 1.0, step=0.1, double=True
-        )
-
-        self.clahe_check, self.clahe_clip_spin, self.clahe_clip_slider = create_parameter_group(
-            "CLAHE Clip Limit", 0.1, 100.0, 16.0, step=0.1, double=True
-        )
-
-        self.clahe_grid_control, self.clahe_grid_spin, self.clahe_grid_slider = create_parameter_group(
-            "CLAHE Grid Size", 1, 64, 16, checkbox=False
-        )
-
-        # Add preview checkbox in the same style as other checkboxes
-        preview_layout = QHBoxLayout()
-        self.preview_check.setText("")
-        self.preview_check.setFixedWidth(30)
-        preview_layout.addWidget(self.preview_check)
-        preview_label = QLabel("")
-        preview_layout.addWidget(preview_label)
-        preview_layout.addStretch()
-        form_layout.addRow("Show Preview:", preview_layout)
-    def _register_controls(self):
-        """Register all controls with base widget"""
-        for control in [
-            self.intensity_slider, self.min_spin, self.max_spin,
-            self.median_size_spin, self.median_slider, self.median_check,
-            self.gaussian_sigma_spin, self.gaussian_slider, self.gaussian_check,
-            self.clahe_clip_spin, self.clahe_clip_slider, self.clahe_check,
-            self.clahe_grid_spin, self.clahe_grid_slider,
-            self.preview_check,
-            self.preprocess_btn,
-            self.reset_btn
-        ]:
-            self.register_control(control)
-
-    def _connect_signals(self):
-        """Connect widget signals"""
-        self.preprocess_btn.clicked.connect(self.run_preprocessing)
-        self.reset_btn.clicked.connect(self.reset_parameters)
-
-        # Intensity range
-        self.intensity_slider.valueChanged.connect(self._update_from_intensity_slider)
-        self.min_spin.valueChanged.connect(self._update_from_intensity_spinboxes)
-        self.max_spin.valueChanged.connect(self._update_from_intensity_spinboxes)
-
-        def connect_slider_spin(slider, spinbox, checkbox=None, scale_factor=1.0, odd_only=False):
-            def update_from_slider(value):
-                spinbox.blockSignals(True)
-                if odd_only:
-                    actual_value = 3 + (value * 2)
-                    spinbox.setValue(actual_value)
-                else:
-                    spinbox.setValue(value * scale_factor)
-                spinbox.blockSignals(False)
-                self.update_parameters()
-
-            def update_from_spin(value):
-                slider.blockSignals(True)
-                if odd_only:
-                    slider_value = int((value - 3) / 2)
-                    slider.setValue(slider_value)
-                else:
-                    slider.setValue(int(value / scale_factor))
-                slider.blockSignals(False)
-                self.update_parameters()
-
-            slider.valueChanged.connect(update_from_slider)
-            spinbox.valueChanged.connect(update_from_spin)
-
-            if checkbox:
-                checkbox.toggled.connect(slider.setEnabled)
-                checkbox.toggled.connect(spinbox.setEnabled)
-                checkbox.toggled.connect(self.update_parameters)
-
-        # Connect parameter controls
-        connect_slider_spin(self.median_slider, self.median_size_spin, self.median_check, odd_only=True)
-        connect_slider_spin(self.gaussian_slider, self.gaussian_sigma_spin, self.gaussian_check, 0.1)
-        connect_slider_spin(self.clahe_clip_slider, self.clahe_clip_spin, self.clahe_check, 0.1)
-        connect_slider_spin(self.clahe_grid_slider, self.clahe_grid_spin)
-
-        # CLAHE checkbox controls both clip and grid parameters
-        self.clahe_check.toggled.connect(self.clahe_grid_spin.setEnabled)
-        self.clahe_check.toggled.connect(self.clahe_grid_slider.setEnabled)
-
-        # Preview
-        self.preview_check.toggled.connect(self.toggle_preview)
-
-        # Viewer dims change
-        if self.viewer is not None:
-            self.viewer.dims.events.current_step.connect(self.update_preview_frame)
 
     def update_preview_frame(self, event: Optional[Event] = None):
         """Update the preview for the current frame"""
@@ -475,60 +529,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
         except Exception as e:
             raise ProcessingError("Preview failed", str(e))
 
-    def update_parameters(self):
-        """Update preprocessing parameters from UI controls"""
-        try:
-            params = PreprocessingParameters(
-                min_intensity=self.current_min_intensity,
-                max_intensity=self.current_max_intensity,
-                enable_median_filter=self.median_check.isChecked(),
-                median_filter_size=self.median_size_spin.value(),
-                enable_gaussian_filter=self.gaussian_check.isChecked(),
-                gaussian_sigma=self.gaussian_sigma_spin.value(),
-                enable_clahe=self.clahe_check.isChecked(),
-                clahe_clip_limit=self.clahe_clip_spin.value(),
-                clahe_grid_size=self.clahe_grid_spin.value()
-            )
-
-            params.validate()
-            self.preprocessor.update_parameters(params)
-
-            self._update_status("Parameters updated")
-            self.parameters_updated.emit()
-
-            if self.preview_enabled:
-                self.update_preview_frame()
-
-        except ValueError as e:
-            raise ProcessingError("Invalid parameters", str(e))
-
-    def reset_parameters(self):
-        """Reset all parameters to defaults"""
-        # Reset intensity range
-        self.intensity_slider.setValue((0, 255))
-        self.min_spin.setValue(0)
-        self.max_spin.setValue(255)
-        self.current_min_intensity = 0
-        self.current_max_intensity = 255
-
-        # Reset filters
-        self.median_check.setChecked(False)
-        self.median_size_spin.setValue(3)
-        self.median_slider.setValue(0)
-
-        self.gaussian_check.setChecked(False)
-        self.gaussian_sigma_spin.setValue(1.0)
-        self.gaussian_slider.setValue(10)
-
-        self.clahe_check.setChecked(False)
-        self.clahe_clip_spin.setValue(16.0)
-        self.clahe_clip_slider.setValue(160)
-        self.clahe_grid_spin.setValue(16)
-        self.clahe_grid_slider.setValue(16)
-
-        self._update_status("Parameters reset to defaults")
-        self.update_parameters()
-
     def _update_from_intensity_slider(self, values):
         """Update spinboxes when intensity range slider changes"""
         min_val, max_val = values
@@ -580,12 +580,16 @@ class PreprocessingWidget(BaseAnalysisWidget):
             if active_layer is None:
                 raise ProcessingError("No image layer selected")
 
+            # Store the data and name from the active layer before processing
+            original_data = active_layer.data.copy()  # Make a copy of the data
+            original_name = active_layer.name
+
             # Disable controls during processing
             self._set_controls_enabled(False)
             self._update_status("Starting preprocessing...", 0)
 
             # Get and validate the image data
-            stack = self._ensure_stack_format(active_layer.data)
+            stack = self._ensure_stack_format(original_data)  # Use the copied data
             if not self._validate_input_data(stack):
                 raise ProcessingError("Invalid input data format")
 
@@ -622,15 +626,20 @@ class PreprocessingWidget(BaseAnalysisWidget):
             # Store current selection
             current_selected = list(self.viewer.layers.selection)
 
-            # Remove existing preprocessed layer if it exists
-            for layer in self.viewer.layers[:]:
-                if layer.name == 'Preprocessed':
-                    self.viewer.layers.remove(layer)
+            # Generate a unique name for the new layer
+            new_layer_name = 'Preprocessed'
+            if original_name == 'Preprocessed':
+                # If processing a 'Preprocessed' layer, add a number suffix
+                existing_names = [layer.name for layer in self.viewer.layers]
+                counter = 1
+                while f'Preprocessed_{counter}' in existing_names:
+                    counter += 1
+                new_layer_name = f'Preprocessed_{counter}'
 
             # Add new preprocessed layer
             preprocessed_layer = self.viewer.add_image(
                 processed_stack,
-                name='Preprocessed',
+                name=new_layer_name,
                 visible=True,
                 metadata={'preprocessing_info': preprocessing_info}
             )
@@ -641,7 +650,9 @@ class PreprocessingWidget(BaseAnalysisWidget):
             # Restore original selection
             self.viewer.layers.selection.clear()
             for layer in current_selected:
-                self.viewer.layers.selection.add(layer)
+                if layer != active_layer:  # Don't reselect the original layer
+                    self.viewer.layers.selection.add(layer)
+            self.viewer.layers.selection.add(preprocessed_layer)  # Select the new layer
 
             # Store results
             self.data_manager.preprocessed_data = processed_stack
@@ -660,7 +671,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
             ))
         finally:
             self._set_controls_enabled(True)
-
     def cleanup(self):
         """Clean up resources"""
         if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
