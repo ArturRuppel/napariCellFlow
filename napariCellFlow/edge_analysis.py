@@ -304,7 +304,6 @@ class EdgeAnalyzer:
 
         return boundaries
 
-
     def _filter_isolated_edges(self, boundaries: List[CellBoundary]) -> List[CellBoundary]:
         """Filter out edges that don't connect to others"""
         # Build connectivity graph
@@ -531,11 +530,13 @@ class EdgeAnalyzer:
         all_intercalations = []
 
         total_frames = len(tracked_data)
-        for frame_num in range(total_frames):
-            if progress_callback:
-                progress_callback(int(100 * frame_num / total_frames))
 
-        for frame_num in range(len(tracked_data)):
+        for frame_num in range(total_frames):
+            # Calculate progress percentage using full range for frame processing
+            if progress_callback:
+                progress = int(100 * frame_num / total_frames)
+                progress_callback(progress, f"Processing frame {frame_num + 1}/{total_frames}")
+
             logger.debug(f"Processing frame {frame_num}")
 
             # Detect edges
@@ -552,6 +553,9 @@ class EdgeAnalyzer:
 
             # Update edge histories
             self._update_edge_histories(frame_num, boundaries)
+
+        if progress_callback:
+            progress_callback(100, "Finalizing analysis...")
 
         logger.info(f"Found total of {len(all_intercalations)} intercalations")
 

@@ -4,7 +4,7 @@ from typing import Optional
 
 import napari
 import numpy as np
-from qtpy.QtCore import Signal
+from qtpy.QtCore import Signal, QObject, QThread
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QFormLayout, QProgressBar, QLabel,
     QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
@@ -19,7 +19,26 @@ from .visualization_manager import VisualizationManager
 
 logger = logging.getLogger(__name__)
 
+class AnalysisWorker(QObject):
+    """Worker object to run analysis in background thread"""
+    progress = Signal(int, str)
+    finished = Signal(object)  # Emits results
+    error = Signal(Exception)
 
+    def __init__(self, analyzer, data):
+        super().__init__()
+        self.analyzer = analyzer
+        self.data = data
+
+    def run(self):
+        try:
+            results = self.analyzer.analyze_sequence(
+                self.data,
+                lambda p, m: self.progress.emit(p, m)
+            )
+            self.finished.emit(results)
+        except Exception as e:
+            self.error.emit(e)
 class EdgeAnalysisWidget(BaseAnalysisWidget):
     """Widget for edge detection and analysis operations."""
 
@@ -52,13 +71,20 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         if not hasattr(self.vis_manager, '_color_cycle'):
             self.vis_manager._color_cycle = np.random.RandomState(0)
 
+        # Initialize analysis components
         self.params = EdgeAnalysisParams()
         self.analyzer = EdgeAnalyzer()
         self.analyzer.update_parameters(self.params)
 
+        # Initialize results storage
         self._current_results = None
         self._current_boundaries = None
 
+        # Initialize thread management
+        self._analysis_thread = None
+        self._analysis_worker = None
+
+        # Initialize UI components
         self._initialize_controls()
         self._setup_ui()
         self._connect_signals()
@@ -90,21 +116,49 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
         try:
             self._set_controls_enabled(False)
-            self._update_status("Starting edge analysis...", 10)
+            self._update_status("Initializing edge analysis...", 5)
 
             self.vis_manager.clear_edge_layers()
 
-            results = self.analyzer.analyze_sequence(selected.data)
+            # Create worker and thread
+            self._analysis_thread = QThread()
+            self._analysis_worker = AnalysisWorker(self.analyzer, selected.data)
+            self._analysis_worker.moveToThread(self._analysis_thread)
+
+            # Connect signals
+            self._analysis_thread.started.connect(self._analysis_worker.run)
+            self._analysis_worker.progress.connect(self._handle_progress)
+            self._analysis_worker.finished.connect(self._handle_analysis_complete)
+            self._analysis_worker.error.connect(self._handle_analysis_error)
+            self._analysis_worker.finished.connect(self._analysis_thread.quit)
+            self._analysis_worker.finished.connect(self._analysis_worker.deleteLater)
+            self._analysis_thread.finished.connect(self._analysis_thread.deleteLater)
+
+            # Start analysis
+            self._analysis_thread.start()
+
+        except Exception as e:
+            self._handle_error(ProcessingError(
+                message="Failed to start analysis",
+                details=str(e),
+                component=self.__class__.__name__
+            ))
+            self._set_controls_enabled(True)
+
+    def _handle_progress(self, progress: int, message: str):
+        """Handle progress updates from worker"""
+        self._update_status(message, progress)
+
+    def _handle_analysis_complete(self, results):
+        """Handle completion of analysis"""
+        try:
             self._current_results = results
-
-            self._update_status("Processing results...", 50)
-
             self.data_manager.analysis_results = results
 
             boundaries_by_frame = self._extract_boundaries(results)
             self._current_boundaries = boundaries_by_frame
 
-            # Direct visualization updates
+            # Update visualizations
             self.vis_manager.update_edge_visualization(boundaries_by_frame)
             self.vis_manager.update_intercalation_visualization(results)
             self.vis_manager.update_edge_analysis_visualization(results)
@@ -112,6 +166,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             self.save_btn.setEnabled(True)
             self.processing_completed.emit(results)
 
+            # Calculate final statistics
             intercalation_count = sum(
                 len(edge.intercalations)
                 for edge in results.edges.values()
@@ -123,17 +178,36 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 100
             )
 
-        except ProcessingError as e:
-            self._handle_error(e)
         except Exception as e:
-            self._handle_error(ProcessingError(
-                message="Unexpected error during edge analysis",
-                details=str(e),
-                component=self.__class__.__name__
-            ))
+            self._handle_analysis_error(e)
         finally:
             self._set_controls_enabled(True)
 
+    def _handle_analysis_error(self, error):
+        """Handle errors from worker"""
+        if isinstance(error, ProcessingError):
+            self._handle_error(error)
+        else:
+            self._handle_error(ProcessingError(
+                message="Error during analysis",
+                details=str(error),
+                component=self.__class__.__name__
+            ))
+        self._set_controls_enabled(True)
+
+    def cleanup(self):
+        """Clean up resources"""
+        if self._analysis_thread and self._analysis_thread.isRunning():
+            self._analysis_thread.quit()
+            self._analysis_thread.wait()
+
+        if self.visualization_manager:
+            self.visualization_manager.clear_edge_layers()
+
+        self._current_results = None
+        self._current_boundaries = None
+
+        super().cleanup()
     def _initialize_controls(self):
         """Initialize all UI controls"""
         # Edge detection parameters
@@ -468,13 +542,3 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         if dialog.exec_():
             return Path(dialog.selectedFiles()[0])
         return None
-
-    def cleanup(self):
-        """Clean up resources"""
-        if self.visualization_manager:
-            self.visualization_manager.clear_edge_layers()
-
-        self._current_results = None
-        self._current_boundaries = None
-
-        super().cleanup()
