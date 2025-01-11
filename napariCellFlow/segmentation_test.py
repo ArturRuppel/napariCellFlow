@@ -76,33 +76,6 @@ Notes:
 """
 
 from unittest.mock import Mock, patch
-
-import numpy as np
-import pytest
-from napariCellFlow.segmentation import SegmentationHandler
-
-
-def create_test_image(size=64):
-    """Create a synthetic test image with simple cell-like objects."""
-    image = np.zeros((size, size), dtype=np.uint8)
-
-    # Add three circular "cells" of different sizes
-    from skimage.draw import disk
-
-    # Large cell in center
-    rr, cc = disk((size // 2, size // 2), 10)
-    image[rr, cc] = 200
-
-    # Two smaller cells
-    rr, cc = disk((size // 4, size // 4), 6)
-    image[rr, cc] = 180
-    rr, cc = disk((3 * size // 4, 3 * size // 4), 8)
-    image[rr, cc] = 220
-
-    return image
-
-
-from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 from napariCellFlow.segmentation import SegmentationHandler, SegmentationParameters
