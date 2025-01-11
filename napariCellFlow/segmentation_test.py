@@ -22,30 +22,19 @@ SegmentationHandler Tests (`TestSegmentationHandler` class):
 13. `test_gpu_cpu_switching`: Verifies switching between GPU and CPU processing modes
 
 SegmentationWidget Tests (`TestSegmentationWidget` class):
-1. Widget Initialization:
-   - Control creation and layout
-   - Default parameter values
-   - Signal connections
-   - Manager integration (data, visualization)
-
-2. UI Interaction:
-   - Parameter control updates
-   - Model selection and switching
-   - Custom model loading dialog
-   - Run button state management
-   - Progress bar updates
-
-3. Processing Operations:
-   - Single frame processing
-   - Stack processing
-   - Cellpose export/import functionality
-   - Error handling and user feedback
-
-4. Integration:
-   - Layer management
-   - Results visualization
-   - Data manager updates
-   - Correction widget interaction
+1. `test_widget_initialization`: Verifies widget initialization with default parameters and component creation
+2. `test_parameter_controls`: Tests validation and updates of various widget controls (diameter, thresholds, size)
+3. `test_model_switching`: Validates model type switching functionality (cyto3, nuclei, custom)
+4. `test_custom_model_loading`: Tests loading and initialization of custom model through UI
+5. `test_run_segmentation_single_frame`: Tests single frame segmentation workflow and result handling
+6. `test_run_segmentation_stack`: Verifies stack processing functionality and progress tracking
+7. `test_error_handling`: Tests proper error handling for widget operations and user feedback
+8. `test_parameter_reset`: Validates parameter reset functionality and default value restoration
+9. `test_parameter_controls`: Tests runtime parameter updates through UI controls
+10. `test_model_switching`: Verifies switching between different model types through UI
+11. `test_custom_model_validation`: Tests validation of custom model parameters in UI
+12. `test_run_button_states`: Validates run button state management during processing
+13. `test_progress_reporting`: Tests progress bar updates and user feedback during operations
 
 Test Data:
 - Uses synthetic test images with known characteristics:
