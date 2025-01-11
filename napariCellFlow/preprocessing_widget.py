@@ -127,10 +127,19 @@ class PreprocessingWidget(BaseAnalysisWidget):
 
         try:
             if enabled:
-                if self.original_layer is None:
-                    self.original_layer = self._get_active_image_layer()
-                    if self.original_layer is None:
-                        raise ProcessingError("No image layer found")
+                # Always get the currently active layer when preview is enabled
+                current_layer = self._get_active_image_layer()
+                if current_layer is None:
+                    raise ProcessingError("No image layer found")
+
+                # If we're switching to a different layer, clean up the old preview
+                if self.original_layer != current_layer:
+                    if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
+                        self.viewer.layers.remove(self.preview_layer)
+                    self.preview_layer = None
+
+                # Update the original layer reference
+                self.original_layer = current_layer
 
                 if self.preview_layer is None:
                     preview_data = (self.original_layer.data[0] if self.original_layer.data.ndim == 3
@@ -164,6 +173,7 @@ class PreprocessingWidget(BaseAnalysisWidget):
                             self.viewer.layers.selection.add(layer)
 
                     self.preview_layer = None
+                    self.original_layer = None  # Also clear the original layer reference
 
         except Exception as e:
             self.preview_check.setChecked(False)
@@ -171,8 +181,8 @@ class PreprocessingWidget(BaseAnalysisWidget):
             if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
                 self.viewer.layers.remove(self.preview_layer)
             self.preview_layer = None
+            self.original_layer = None  # Clear the original layer reference on error
             raise ProcessingError("Preview failed", str(e))
-
     def _initialize_controls(self):
         """Initialize all UI controls"""
         # Intensity controls
