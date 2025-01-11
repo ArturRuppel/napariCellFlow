@@ -240,16 +240,29 @@ class PreprocessingWidget(BaseAnalysisWidget):
 
         # Configure spinboxes
         spin_layout = QHBoxLayout()
+        spin_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Configure individual spinboxes
         for spin in (self.min_spin, self.max_spin):
             spin.setRange(0, 255)
             spin.setFixedWidth(80)
-            spin_layout.addWidget(spin)
-        spin_layout.addStretch()
-        layout.addLayout(spin_layout)
 
+        # Set initial values explicitly
+        self.min_spin.setValue(0)
+        self.max_spin.setValue(255)
+
+        # Left spinbox
+        spin_layout.addWidget(self.min_spin)
+
+        # Stretch to push max spinbox right
+        spin_layout.addStretch(1)
+
+        # Right spinbox - explicitly specify alignment
+        spin_layout.addWidget(self.max_spin, alignment=Qt.AlignRight)
+
+        layout.addLayout(spin_layout)
         group.setLayout(layout)
         return group
-
     def _create_filter_controls(self, form_layout: QFormLayout):
         """Create filter parameter controls"""
 
@@ -323,10 +336,10 @@ class PreprocessingWidget(BaseAnalysisWidget):
         self.preview_check.setText("")
         self.preview_check.setFixedWidth(30)
         preview_layout.addWidget(self.preview_check)
-        preview_label = QLabel("Show Preview")
+        preview_label = QLabel("")
         preview_layout.addWidget(preview_label)
         preview_layout.addStretch()
-        form_layout.addRow("Preview:", preview_layout)
+        form_layout.addRow("Show Preview:", preview_layout)
     def _register_controls(self):
         """Register all controls with base widget"""
         for control in [
