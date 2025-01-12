@@ -3,6 +3,7 @@ from typing import Optional
 
 import napari
 import numpy as np
+from cellpose.models import Cellpose
 from napari.layers import Image
 from qtpy.QtCore import Signal, Qt, QObject, QThread
 from qtpy.QtWidgets import (
@@ -134,13 +135,6 @@ class SegmentationWidget(BaseAnalysisWidget):
             "This is crucial for accurate segmentation"
         )
 
-        self.estimate_diameter_btn = QPushButton("Estimate diameter from image")
-        self.estimate_diameter_btn.setToolTip(
-            "Automatically estimate cell diameter from the current image\n"
-            "Uses Cellpose's built-in estimation algorithm\n"
-            "Will update the diameter parameter with the estimated value"
-        )
-
         self.show_scale_disk_check = QCheckBox("Show scale disk")
         self.show_scale_disk_check.setToolTip(
             "Display a reference circle in the top left corner\n"
@@ -247,7 +241,7 @@ class SegmentationWidget(BaseAnalysisWidget):
             self.model_combo, self.custom_model_btn,
             self.diameter_spin, self.flow_spin, self.prob_spin, self.size_spin,
             self.gpu_check, self.normalize_check, self.compute_diameter_check,
-            self.show_scale_disk_check, self.estimate_diameter_btn,  # New controls
+            self.show_scale_disk_check,
             self.run_btn, self.run_stack_btn,
             self.export_btn, self.import_btn, self.reset_params_btn
         ]:
@@ -270,9 +264,7 @@ class SegmentationWidget(BaseAnalysisWidget):
             else:
                 control.stateChanged.connect(self.parameters_updated.emit)
 
-        # Connect new controls
         self.show_scale_disk_check.stateChanged.connect(self._update_scale_disk)
-        self.estimate_diameter_btn.clicked.connect(self._estimate_diameter)
         self.diameter_spin.valueChanged.connect(self._update_scale_disk)
 
         # Action signals
@@ -553,7 +545,6 @@ class SegmentationWidget(BaseAnalysisWidget):
 
         # Add scale disk checkbox and estimate diameter button
         params_layout.addWidget(self.show_scale_disk_check)
-        params_layout.addWidget(self.estimate_diameter_btn)
         params_layout.addWidget(self.reset_params_btn)
 
         params_group.setLayout(params_layout)
@@ -1244,7 +1235,3 @@ class SegmentationWidget(BaseAnalysisWidget):
             self.correction_widget.cleanup()
         super().cleanup()
 
-    def _estimate_diameter(self):
-        """Mock method: Estimate diameter from current image"""
-        # This will be implemented later
-        pass
