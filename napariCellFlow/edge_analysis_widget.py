@@ -19,6 +19,7 @@ from .visualization_manager import VisualizationManager
 
 logger = logging.getLogger(__name__)
 
+
 class AnalysisWorker(QObject):
     """Worker object to run analysis in background thread"""
     progress = Signal(int, str)
@@ -39,6 +40,8 @@ class AnalysisWorker(QObject):
             self.finished.emit(results)
         except Exception as e:
             self.error.emit(e)
+
+
 class EdgeAnalysisWidget(BaseAnalysisWidget):
     """Widget for edge detection and analysis operations."""
 
@@ -89,18 +92,39 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self._setup_ui()
         self._connect_signals()
 
+        # Add layer events handlers for dynamic UI updates
+        self.viewer.layers.events.removed.connect(self._update_ui_state)
+        self.viewer.layers.events.inserted.connect(self._update_ui_state)
+        self.viewer.layers.selection.events.changed.connect(self._update_ui_state)
+
+        # Initial UI state update
+        self._update_ui_state()
+
+    def _update_ui_state(self, event=None):
+        """Update UI based on current state"""
+        # Check for valid input: active labels layer
+        active_layer = self._get_active_labels_layer()
+        has_valid_input = (active_layer is not None and
+                           isinstance(active_layer, napari.layers.Labels) and
+                           active_layer.data.ndim in [2, 3])
+
+        # Update button states
+        self.analyze_btn.setEnabled(has_valid_input)
+
+        # Optionally disable save button if no results exist
+        if hasattr(self, 'save_btn'):
+            self.save_btn.setEnabled(self._current_results is not None)
+
     def _connect_signals(self):
-        # Parameter signals
+        # Existing signal connections
         self.dilation_spin.valueChanged.connect(self.update_parameters)
         self.overlap_spin.valueChanged.connect(self.update_parameters)
         self.min_length_spin.valueChanged.connect(self.update_parameters)
         self.filter_isolated_check.stateChanged.connect(self.update_parameters)
 
-        # Connect visualization signals
         self.edges_detected.connect(self.vis_manager.update_edge_visualization)
         self.analysis_completed.connect(self.vis_manager.update_edge_analysis_visualization)
 
-        # Action buttons
         self.analyze_btn.clicked.connect(self.run_analysis)
         self.save_btn.clicked.connect(self.save_results)
         self.load_btn.clicked.connect(self.load_results)
@@ -208,6 +232,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self._current_boundaries = None
 
         super().cleanup()
+
     def _initialize_controls(self):
         """Initialize all UI controls"""
         # Edge detection parameters
