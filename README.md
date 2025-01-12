@@ -177,7 +177,7 @@ The edge analysis widget detects and analyzes cell boundaries and intercalation 
 - Check GPU memory if processing large datasets
 
 ## Getting Help
-- Check the [GitHub repository](https://github.com/yourusername/napariCellFlow) for updates
+- Check the [GitHub repository](https://github.com/ArturRuppel/napariCellFlow) for updates
 - Report issues through the GitHub issue tracker
 - Consult the API documentation for advanced usage
 - Join the napari community for general support
