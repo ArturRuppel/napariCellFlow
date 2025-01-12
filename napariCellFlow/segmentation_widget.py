@@ -1111,30 +1111,47 @@ class SegmentationWidget(BaseAnalysisWidget):
                 self._custom_model_path = None
 
     def _update_scale_disk(self, *args):
-        """Update or create a label layer showing the current diameter as a circle."""
-        # Remove existing Scale Disk layer (with correct name)
-        while 'Scale Disk' in [layer.name for layer in self.viewer.layers]:
-            self.viewer.layers.remove('Scale Disk')
+        """Update or create a circle shape showing the current diameter."""
+        if not hasattr(self, '_scale_disk_layer'):
+            self._scale_disk_layer = None
 
-        # Only create new layer if checkbox is checked
+        # Remove existing shape if unchecked
         if not self.show_scale_disk_check.isChecked():
+            if self._scale_disk_layer is not None and self._scale_disk_layer in self.viewer.layers:
+                self.viewer.layers.remove(self._scale_disk_layer)
+                self._scale_disk_layer = None
             return
 
         try:
-            # Create disk data
+            # Create circle data - center coordinates
             diameter = int(self.diameter_spin.value())
-            size = diameter + 4
-            data = np.zeros((size, size), dtype=np.uint16)
+            npoints = 100  # Number of points to make circle smooth
+            theta = np.linspace(0, 2 * np.pi, npoints)
+            radius = diameter / 2
 
-            rr, cc = np.ogrid[:size, :size]
-            center = size // 2
-            radius = diameter // 2
-            circle_mask = (rr - center) ** 2 + (cc - center) ** 2 <= radius ** 2
-            data[circle_mask] = 1
+            # Create circle centered at (radius + margin, radius + margin)
+            margin = 10
+            center_x = radius + margin
+            center_y = radius + margin
 
-            # Create new layer with explicit name
-            labels_layer = self.viewer.add_labels(data, opacity=0.8)
-            labels_layer.name = 'Scale Disk'  # Explicitly set the name
+            circle_points = np.column_stack((
+                center_x + radius * np.cos(theta),
+                center_y + radius * np.sin(theta)
+            ))
+
+            # Add as shape layer
+            if self._scale_disk_layer is not None and self._scale_disk_layer in self.viewer.layers:
+                self._scale_disk_layer.data = [circle_points]
+            else:
+                self._scale_disk_layer = self.viewer.add_shapes(
+                    data=[circle_points],
+                    shape_type='path',
+                    edge_width=2,
+                    edge_color='cyan',
+                    face_color='transparent',
+                    opacity=1,
+                    z_index=100  # Keep on top
+                )
 
         except Exception as e:
             self._handle_error(ProcessingError(
@@ -1142,7 +1159,6 @@ class SegmentationWidget(BaseAnalysisWidget):
                 str(e),
                 self.__class__.__name__
             ))
-
     def _handle_layer_removal(self, event):
         """Handle layer removal events"""
         removed_layer = event.value
