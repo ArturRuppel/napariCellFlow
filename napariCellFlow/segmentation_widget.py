@@ -63,6 +63,8 @@ class SegmentationWorker(QObject):
 
         except Exception as e:
             self.error.emit(e)
+
+
 class SegmentationWidget(BaseAnalysisWidget):
     """Widget for controlling cell segmentation in napari"""
 
@@ -102,6 +104,127 @@ class SegmentationWidget(BaseAnalysisWidget):
         self._segmentation_worker = None
         self._processing = False
 
+    def _initialize_controls(self):
+        """Initialize all UI controls"""
+        # Model selection controls
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(["cyto3", "nuclei", "custom"])
+        self.model_combo.setToolTip(
+            "Select the model type:\n"
+            "- cyto3: Optimized for cytoplasm detection\n"
+            "- nuclei: Specialized for nucleus detection\n"
+            "- custom: Use your own trained model"
+        )
+
+        self.custom_model_btn = QPushButton("Load Custom...")
+        self.custom_model_btn.setEnabled(False)
+        self.custom_model_btn.setToolTip(
+            "Load a custom trained Cellpose model (.pth file)\n"
+            "Only enabled when 'custom' model type is selected"
+        )
+
+        # Parameter controls
+        self.diameter_spin = QDoubleSpinBox()
+        self.diameter_spin.setRange(0.1, 1000.0)
+        self.diameter_spin.setValue(95.0)
+        self.diameter_spin.setToolTip(
+            "Expected diameter of cells in pixels\n"
+            "Larger values will detect larger cells\n"
+            "Smaller values will detect smaller cells\n"
+            "This is crucial for accurate segmentation"
+        )
+
+        self.flow_spin = QDoubleSpinBox()
+        self.flow_spin.setRange(0.0, 1.0)
+        self.flow_spin.setValue(0.6)
+        self.flow_spin.setSingleStep(0.1)
+        self.flow_spin.setToolTip(
+            "Controls how easily cells are split apart (0.0-1.0)\n"
+            "Higher values: More likely to split touching cells into separate cells\n"
+            "Lower values: More likely to keep touching cells merged as one cell\n"
+            "Start with 0.6 and adjust if cells are over-split or under-split"
+        )
+
+        self.prob_spin = QDoubleSpinBox()
+        self.prob_spin.setRange(0.0, 1.0)
+        self.prob_spin.setValue(0.0)
+        self.prob_spin.setSingleStep(0.1)
+        self.prob_spin.setToolTip(
+            "Probability threshold for cell detection (0.0-1.0)\n"
+            "Higher values: Only detect high-confidence cells\n"
+            "Lower values: Detect more potential cells\n"
+            "Adjust to balance false positives vs. false negatives"
+        )
+
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(1, 10000)
+        self.size_spin.setValue(25)
+        self.size_spin.setToolTip(
+            "Minimum size of detected cells in pixels\n"
+            "Objects smaller than this will be filtered out\n"
+            "Helps remove noise and artifacts\n"
+            "Set based on your smallest expected cell size"
+        )
+
+        # Option controls
+        self.gpu_check = QCheckBox("Use GPU")
+        self.gpu_check.setToolTip(
+            "Enable GPU acceleration for faster processing\n"
+            "Requires CUDA-compatible GPU\n"
+            "Automatically falls back to CPU if GPU unavailable"
+        )
+
+        self.normalize_check = QCheckBox("Normalize")
+        self.normalize_check.setToolTip(
+            "Normalize image intensity before processing\n"
+            "Recommended for images with varying brightness\n"
+            "Helps maintain consistent segmentation across frames"
+        )
+
+        self.compute_diameter_check = QCheckBox("Auto-compute diameter")
+        self.compute_diameter_check.setToolTip(
+            "Automatically estimate cell diameter from image\n"
+            "Can be slower but helps with varying cell sizes\n"
+            "Override manually if results are incorrect"
+        )
+
+        # Set checkbox defaults
+        self.gpu_check.setChecked(True)
+        self.normalize_check.setChecked(True)
+        self.compute_diameter_check.setChecked(False)
+
+        # Action buttons
+        self.run_btn = QPushButton("Segment Frame")
+        self.run_btn.setToolTip(
+            "Process the currently visible frame\n"
+            "Results will be added to the segmentation layer"
+        )
+
+        self.run_stack_btn = QPushButton("Run Segmentation")
+        self.run_stack_btn.setToolTip(
+            "Process all frames in the current stack\n"
+            "May take several minutes for large stacks\n"
+            "Progress will be shown in status bar"
+        )
+
+        self.export_btn = QPushButton("Export to Cellpose")
+        self.export_btn.setToolTip(
+            "Export current segmentation for training new models or editing in Cellpose GUI\n"
+            "Saves both images and segmentation masks"
+        )
+
+        self.import_btn = QPushButton("Import from Cellpose")
+        self.import_btn.setToolTip(
+            "Import segmentation results from Cellpose GUI\n"
+            "Will update existing segmentation layer"
+        )
+
+        self.reset_params_btn = QPushButton("Reset Parameters")
+        self.reset_params_btn.setToolTip(
+            "Reset all parameters to default values\n"
+            "Useful if segmentation results are poor\n"
+            "Will not affect existing segmentations"
+        )
     def _run_segmentation(self):
         """Run segmentation on current frame"""
         if getattr(self, '_processing', False):
@@ -186,6 +309,7 @@ class SegmentationWidget(BaseAnalysisWidget):
             ))
             self._processing = False
             self._set_controls_enabled(True)
+
     def _run_stack_segmentation(self):
         """Run segmentation on entire stack"""
         if getattr(self, '_processing', False):
@@ -454,50 +578,6 @@ class SegmentationWidget(BaseAnalysisWidget):
             self.export_btn, self.import_btn, self.reset_params_btn
         ]:
             self.register_control(control)
-
-    def _initialize_controls(self):
-        """Initialize all UI controls"""
-        # Model selection controls
-        self.model_combo = QComboBox()
-        self.model_combo.addItems(["cyto3", "nuclei", "custom"])
-        self.custom_model_btn = QPushButton("Load Custom...")
-        self.custom_model_btn.setEnabled(False)
-
-        # Parameter controls
-        self.diameter_spin = QDoubleSpinBox()
-        self.diameter_spin.setRange(0.1, 1000.0)
-        self.diameter_spin.setValue(95.0)
-
-        self.flow_spin = QDoubleSpinBox()
-        self.flow_spin.setRange(0.0, 1.0)
-        self.flow_spin.setValue(0.6)
-        self.flow_spin.setSingleStep(0.1)
-
-        self.prob_spin = QDoubleSpinBox()
-        self.prob_spin.setRange(0.0, 1.0)
-        self.prob_spin.setValue(0.0)
-        self.prob_spin.setSingleStep(0.1)
-
-        self.size_spin = QSpinBox()
-        self.size_spin.setRange(1, 10000)
-        self.size_spin.setValue(25)
-
-        # Option controls
-        self.gpu_check = QCheckBox("Use GPU")
-        self.normalize_check = QCheckBox("Normalize")
-        self.compute_diameter_check = QCheckBox("Auto-compute diameter")
-
-        # Set checkbox defaults
-        self.gpu_check.setChecked(True)
-        self.normalize_check.setChecked(True)
-        self.compute_diameter_check.setChecked(False)
-
-        # Action buttons
-        self.run_btn = QPushButton("Segment Frame")
-        self.run_stack_btn = QPushButton("Run Segmentation")
-        self.export_btn = QPushButton("Export to Cellpose")
-        self.import_btn = QPushButton("Import from Cellpose")
-        self.reset_params_btn = QPushButton("Reset Parameters")
 
     def _create_cellpose_group(self) -> QGroupBox:
         """Create Cellpose integration group"""
