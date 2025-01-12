@@ -110,10 +110,93 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
         # Update button states
         self.analyze_btn.setEnabled(has_valid_input)
+        self.save_btn.setEnabled(self._current_results is not None)
 
-        # Optionally disable save button if no results exist
-        if hasattr(self, 'save_btn'):
-            self.save_btn.setEnabled(self._current_results is not None)
+    def load_results(self):
+        """Load previously saved analysis results"""
+        try:
+            file_path = self._get_load_path()
+            if file_path is None:
+                # User cancelled the file dialog
+                self._update_ui_state()  # Ensure buttons are in correct state
+                return
+
+            if not file_path.exists():
+                raise ProcessingError(
+                    message="File not found",
+                    details=str(file_path),
+                    component=self.__class__.__name__
+                )
+
+            self._set_controls_enabled(False)
+            self._update_status("Loading analysis results...", 20)
+
+            # Clear previous visualizations
+            self.vis_manager.clear_edge_layers()
+
+            # Load and validate data
+            self.data_manager.load_analysis_results(file_path)
+            loaded_data = self.data_manager.analysis_results
+
+            if loaded_data is None:
+                raise ProcessingError(
+                    message="No valid analysis results found in file",
+                    component=self.__class__.__name__
+                )
+
+            # Validate essential attributes
+            if not hasattr(loaded_data, 'edges') or not loaded_data.edges:
+                raise ProcessingError(
+                    message="Invalid analysis results: missing edge data",
+                    component=self.__class__.__name__
+                )
+
+            # Store current results
+            self._current_results = loaded_data
+
+            # Extract and validate boundaries
+            boundaries_by_frame = self._extract_boundaries(loaded_data)
+            if not boundaries_by_frame:
+                raise ProcessingError(
+                    message="No valid boundary data found in results",
+                    component=self.__class__.__name__
+                )
+            self._current_boundaries = boundaries_by_frame
+
+            # Update visualizations
+            self._update_status("Updating visualizations...", 60)
+            self.vis_manager.update_edge_visualization(boundaries_by_frame)
+            self.vis_manager.update_intercalation_visualization(loaded_data)
+            self.vis_manager.update_edge_analysis_visualization(loaded_data)
+
+            # Emit signals for other components
+            self.edges_detected.emit(boundaries_by_frame)
+            self.analysis_completed.emit(loaded_data)
+
+            self._update_status(
+                f"Loaded analysis results from {file_path.name} "
+                f"({len(loaded_data.edges)} edges)",
+                100
+            )
+
+        except Exception as e:
+            if isinstance(e, ProcessingError):
+                self._handle_error(e)  # Pass through existing ProcessingErrors
+            else:
+                # Use base widget's error handling
+                self._handle_error(ProcessingError(
+                    message="Failed to load results",
+                    details=str(e),
+                    component=self.__class__.__name__
+                ))
+
+            # Clear any partial results
+            self._current_results = None
+            self._current_boundaries = None
+
+        finally:
+            self._set_controls_enabled(True)
+            self._update_ui_state()  # Ensure buttons are in correct state
 
     def _connect_signals(self):
         # Existing signal connections
@@ -129,6 +212,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self.save_btn.clicked.connect(self.save_results)
         self.load_btn.clicked.connect(self.load_results)
         self.reset_btn.clicked.connect(self.reset_parameters)
+
 
     def run_analysis(self):
         selected = self._get_active_labels_layer()
@@ -394,87 +478,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self.analyzer.update_parameters(default_params)
         self.parameters_updated.emit()
         self._update_status("Parameters reset to defaults")
-
-    def load_results(self):
-        """Load previously saved analysis results"""
-        try:
-            file_path = self._get_load_path()
-            if file_path is None:
-                return
-
-            if not file_path.exists():
-                raise ProcessingError(
-                    message="File not found",
-                    details=str(file_path),
-                    component=self.__class__.__name__
-                )
-
-            self._set_controls_enabled(False)
-            self._update_status("Loading analysis results...", 20)
-
-            # Clear previous visualizations
-            self.vis_manager.clear_edge_layers()
-
-            # Load and validate data
-            self.data_manager.load_analysis_results(file_path)
-            loaded_data = self.data_manager.analysis_results
-
-            if loaded_data is None:
-                raise ProcessingError(
-                    message="No valid analysis results found in file",
-                    component=self.__class__.__name__
-                )
-
-            # Validate essential attributes
-            if not hasattr(loaded_data, 'edges') or not loaded_data.edges:
-                raise ProcessingError(
-                    message="Invalid analysis results: missing edge data",
-                    component=self.__class__.__name__
-                )
-
-            # Store current results
-            self._current_results = loaded_data
-
-            # Extract and validate boundaries
-            boundaries_by_frame = self._extract_boundaries(loaded_data)
-            if not boundaries_by_frame:
-                raise ProcessingError(
-                    message="No valid boundary data found in results",
-                    component=self.__class__.__name__
-                )
-            self._current_boundaries = boundaries_by_frame
-
-            # Update visualizations
-            self._update_status("Updating visualizations...", 60)
-            self.vis_manager.update_edge_visualization(boundaries_by_frame)
-            self.vis_manager.update_intercalation_visualization(loaded_data)
-            self.vis_manager.update_edge_analysis_visualization(loaded_data)
-
-            # Enable relevant controls
-            self.save_btn.setEnabled(True)
-
-            # Emit signals for other components
-            self.edges_detected.emit(boundaries_by_frame)
-            self.analysis_completed.emit(loaded_data)
-
-            self._update_status(
-                f"Loaded analysis results from {file_path.name} "
-                f"({len(loaded_data.edges)} edges)",
-                100
-            )
-
-        except Exception as e:
-            if isinstance(e, ProcessingError):
-                self._handle_error(e)  # Pass through existing ProcessingErrors
-            else:
-                # Use base widget's error handling
-                self._handle_error(ProcessingError(
-                    message="Failed to load results",
-                    details=str(e),
-                    component=self.__class__.__name__
-                ))
-        finally:
-            self._set_controls_enabled(True)
 
     def save_results(self):
         """Save the current analysis results"""
