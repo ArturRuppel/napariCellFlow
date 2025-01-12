@@ -67,7 +67,6 @@ class napariCellFlow(QWidget):
             self.visualization_manager
         )
 
-
         # Add widgets to tabs
         tabs.addTab(self.preprocessing_widget, "Preprocessing")
         tabs.addTab(self.segmentation_widget, "Segmentation")
@@ -102,8 +101,6 @@ class napariCellFlow(QWidget):
         self.segmentation_widget.processing_completed.connect(self._on_segmentation_completed)
         self.segmentation_widget.processing_failed.connect(self._on_segmentation_failed)
 
-
-
     def _on_preprocessing_completed(self, processed_stack, preprocessing_info):
         """Handle completion of preprocessing"""
         logger.info("Preprocessing completed successfully")
@@ -133,5 +130,3 @@ class napariCellFlow(QWidget):
         """Handle tracking failure"""
         logger.error(f"Tracking failed: {error_msg}")
         QMessageBox.critical(self, "Error", f"Tracking failed: {error_msg}")
-
-
