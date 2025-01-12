@@ -4,7 +4,7 @@ from typing import Optional
 import napari
 import numpy as np
 from napari.utils.events import Event
-from qtpy.QtCore import Signal, Qt
+from qtpy.QtCore import Signal, Qt, QObject, QThread
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSlider, QGroupBox, QSizePolicy, QProgressBar, QLabel,
     QSpinBox, QDoubleSpinBox, QCheckBox, QPushButton,
@@ -18,6 +18,51 @@ from .preprocessing import PreprocessingParameters, ImagePreprocessor
 from .visualization_manager import VisualizationManager
 
 logger = logging.getLogger(__name__)
+
+
+class PreprocessingWorker(QObject):
+    """Worker object to run preprocessing in background thread"""
+    progress = Signal(int, str)
+    finished = Signal(tuple)  # Emits (processed_stack, preprocessing_info)
+    error = Signal(Exception)
+
+    def __init__(self, preprocessor: ImagePreprocessor, stack: np.ndarray):
+        super().__init__()
+        self.preprocessor = preprocessor
+        self.stack = stack
+
+    def run(self):
+        try:
+            total_frames = len(self.stack)
+            processed_frames = []
+            preprocessing_info = []
+
+            # Process each frame
+            for frame_idx in range(total_frames):
+                progress = int(5 + (90 * frame_idx / total_frames))
+                self.progress.emit(progress, f"Processing frame {frame_idx + 1}/{total_frames}")
+
+                # Get frame
+                frame = self.stack[frame_idx].copy()
+
+                # Convert to 8-bit and process
+                try:
+                    frame_8bit = self.preprocessor.convert_to_8bit(frame)
+                    processed_frame, frame_info = self.preprocessor.preprocess_frame(frame_8bit)
+                    processed_frames.append(processed_frame)
+                    preprocessing_info.append(frame_info)
+                except Exception as e:
+                    raise ProcessingError(
+                        f"Error processing frame {frame_idx}",
+                        str(e)
+                    )
+
+            # Combine processed frames
+            processed_stack = np.stack(processed_frames, axis=0)
+            self.finished.emit((processed_stack, preprocessing_info))
+
+        except Exception as e:
+            self.error.emit(e)
 
 
 class PreprocessingWidget(BaseAnalysisWidget):
@@ -48,6 +93,10 @@ class PreprocessingWidget(BaseAnalysisWidget):
         self.current_min_intensity = 0
         self.current_max_intensity = 255
 
+        # Initialize thread management
+        self._preprocessing_thread = None
+        self._preprocessing_worker = None
+
         # Initialize all controls
         self._initialize_controls()
 
@@ -63,58 +112,42 @@ class PreprocessingWidget(BaseAnalysisWidget):
         # Initial UI state update
         self._update_ui_state()
 
-    def _connect_signals(self):
-        """Connect widget signals"""
-        self.preprocess_btn.clicked.connect(self.run_preprocessing)
-        self.reset_btn.clicked.connect(self.reset_parameters)
+    def _setup_ui(self):
+        """Initialize the user interface"""
+        # Create right side container
+        right_container = QWidget()
+        right_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        right_container.setFixedWidth(350)
 
-        # Intensity range
-        self.intensity_slider.valueChanged.connect(self._update_from_intensity_slider)
-        self.min_spin.valueChanged.connect(self._update_from_intensity_spinboxes)
-        self.max_spin.valueChanged.connect(self._update_from_intensity_spinboxes)
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(8)
+        right_layout.setContentsMargins(6, 6, 6, 6)
 
-        def connect_slider_spin(slider, spinbox, scale_factor=1.0, odd_only=False):
-            def update_from_slider(value):
-                spinbox.blockSignals(True)
-                if odd_only:
-                    if value == 0:
-                        spinbox.setValue(0)
-                    else:
-                        actual_value = 1 + (value * 2)  # Start from 3,5,7,... for non-zero values
-                        spinbox.setValue(actual_value)
-                else:
-                    spinbox.setValue(value * scale_factor)
-                spinbox.blockSignals(False)
-                self.update_parameters()
+        # Create and add groups
+        right_layout.addWidget(self._create_intensity_group())
+        right_layout.addWidget(self._create_filter_group())
 
-            def update_from_spin(value):
-                slider.blockSignals(True)
-                if odd_only:
-                    if value == 0:
-                        slider.setValue(0)
-                    else:
-                        slider_value = (value - 1) // 2  # Convert back to slider value
-                        slider.setValue(slider_value)
-                else:
-                    slider.setValue(int(value / scale_factor))
-                slider.blockSignals(False)
-                self.update_parameters()
+        # Add preprocess button
+        right_layout.addWidget(self.preprocess_btn)
 
-            slider.valueChanged.connect(update_from_slider)
-            spinbox.valueChanged.connect(update_from_spin)
+        # Add status section
+        status_layout = QVBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        status_layout.addWidget(self.progress_bar)
+        status_layout.addWidget(self.status_label)
+        right_layout.addLayout(status_layout)
 
-        # Connect parameter controls
-        connect_slider_spin(self.median_slider, self.median_size_spin, odd_only=True)
-        connect_slider_spin(self.gaussian_slider, self.gaussian_sigma_spin, 0.1)
-        connect_slider_spin(self.clahe_clip_slider, self.clahe_clip_spin, 0.1)
-        connect_slider_spin(self.clahe_grid_slider, self.clahe_grid_spin)
+        right_layout.addStretch()
+        right_container.setLayout(right_layout)
 
-        # Preview
-        self.preview_check.toggled.connect(self.toggle_preview)
+        # Add to the main layout
+        self.main_layout.addWidget(right_container)
+        self.main_layout.addStretch(1)
 
-        # Viewer dims change
-        if self.viewer is not None:
-            self.viewer.dims.events.current_step.connect(self.update_preview_frame)
+        # Register controls
+        self._register_controls()
 
     def _create_filter_controls(self, form_layout: QFormLayout):
         """Create filter parameter controls"""
@@ -251,6 +284,143 @@ class PreprocessingWidget(BaseAnalysisWidget):
 
         return group
 
+    def _create_filter_group(self) -> QGroupBox:
+        """Create parameters group with all controls"""
+        group = QGroupBox("Parameters")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+
+        # Create form layout for parameters
+        form_layout = QFormLayout()
+        form_layout.setSpacing(4)
+
+        # Create filter controls
+        self._create_filter_controls(form_layout)
+
+        # Add form layout to main layout
+        layout.addLayout(form_layout)
+
+        # Add reset button spanning full width
+        layout.addSpacing(8)  # Add some space before the reset button
+        layout.addWidget(self.reset_btn)
+
+        group.setLayout(layout)
+        return group
+
+    def _connect_signals(self):
+        """Connect widget signals"""
+        self.preprocess_btn.clicked.connect(self.run_preprocessing)
+        self.reset_btn.clicked.connect(self.reset_parameters)
+
+        # Intensity range
+        self.intensity_slider.valueChanged.connect(self._update_from_intensity_slider)
+        self.min_spin.valueChanged.connect(self._update_from_intensity_spinboxes)
+        self.max_spin.valueChanged.connect(self._update_from_intensity_spinboxes)
+
+        def connect_slider_spin(slider, spinbox, scale_factor=1.0, odd_only=False):
+            def update_from_slider(value):
+                spinbox.blockSignals(True)
+                if odd_only:
+                    if value == 0:
+                        spinbox.setValue(0)
+                    else:
+                        actual_value = 1 + (value * 2)  # Start from 3,5,7,... for non-zero values
+                        spinbox.setValue(actual_value)
+                else:
+                    spinbox.setValue(value * scale_factor)
+                spinbox.blockSignals(False)
+                self.update_parameters()
+
+            def update_from_spin(value):
+                slider.blockSignals(True)
+                if odd_only:
+                    if value == 0:
+                        slider.setValue(0)
+                    else:
+                        slider_value = (value - 1) // 2  # Convert back to slider value
+                        slider.setValue(slider_value)
+                else:
+                    slider.setValue(int(value / scale_factor))
+                slider.blockSignals(False)
+                self.update_parameters()
+
+            slider.valueChanged.connect(update_from_slider)
+            spinbox.valueChanged.connect(update_from_spin)
+
+        # Connect parameter controls
+        connect_slider_spin(self.median_slider, self.median_size_spin, odd_only=True)
+        connect_slider_spin(self.gaussian_slider, self.gaussian_sigma_spin, 0.1)
+        connect_slider_spin(self.clahe_clip_slider, self.clahe_clip_spin, 0.1)
+        connect_slider_spin(self.clahe_grid_slider, self.clahe_grid_spin)
+
+        # Preview
+        self.preview_check.toggled.connect(self.toggle_preview)
+
+        # Viewer dims change
+        if self.viewer is not None:
+            self.viewer.dims.events.current_step.connect(self.update_preview_frame)
+
+    def _initialize_controls(self):
+        """Initialize all UI controls"""
+        # Intensity controls
+        self.intensity_slider = QRangeSlider(Qt.Horizontal)
+        self.min_spin = QSpinBox()
+        self.max_spin = QSpinBox()
+
+        # Filter controls
+        self.median_size_spin = QSpinBox()
+        self.median_slider = QSlider(Qt.Horizontal)
+
+        self.gaussian_sigma_spin = QDoubleSpinBox()
+        self.gaussian_slider = QSlider(Qt.Horizontal)
+
+        self.clahe_clip_spin = QDoubleSpinBox()
+        self.clahe_clip_slider = QSlider(Qt.Horizontal)
+        self.clahe_grid_spin = QSpinBox()
+        self.clahe_grid_slider = QSlider(Qt.Horizontal)
+
+        # Preview control
+        self.preview_check = QCheckBox("")
+
+        # Action buttons
+        self.preprocess_btn = QPushButton("Run Preprocessing")
+        self.reset_btn = QPushButton("Reset Parameters")
+
+    def _register_controls(self):
+        """Register all controls with base widget"""
+        for control in [
+            self.intensity_slider, self.min_spin, self.max_spin,
+            self.median_size_spin, self.median_slider,
+            self.gaussian_sigma_spin, self.gaussian_slider,
+            self.clahe_clip_spin, self.clahe_clip_slider,
+            self.clahe_grid_spin, self.clahe_grid_slider,
+            self.preview_check,
+            self.preprocess_btn,
+            self.reset_btn
+        ]:
+            self.register_control(control)
+
+    def _update_ui_state(self, event=None):
+        """Update UI based on current state"""
+        active_layer = self._get_active_image_layer()
+        has_valid_image = (active_layer is not None and
+                           isinstance(active_layer, napari.layers.Image) and
+                           active_layer.data.ndim in [2, 3])
+
+        # Update button states
+        self.preprocess_btn.setEnabled(has_valid_image)
+        self.preview_check.setEnabled(has_valid_image)
+
+        # Disable preview if the original layer is gone or no longer selected
+        if self.preview_enabled and self.original_layer is not None:
+            if self.original_layer not in self.viewer.layers:
+                self.preview_check.setChecked(False)
+                self.preview_enabled = False
+                if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
+                    self.viewer.layers.remove(self.preview_layer)
+                self.preview_layer = None
+                self.original_layer = None
+
     def update_parameters(self):
         """Update preprocessing parameters from UI controls"""
         try:
@@ -315,104 +485,45 @@ class PreprocessingWidget(BaseAnalysisWidget):
         self._update_status("Parameters reset to defaults")
         self.update_parameters()
 
-    def _register_controls(self):
-        """Register all controls with base widget"""
-        for control in [
-            self.intensity_slider, self.min_spin, self.max_spin,
-            self.median_size_spin, self.median_slider,
-            self.gaussian_sigma_spin, self.gaussian_slider,
-            self.clahe_clip_spin, self.clahe_clip_slider,
-            self.clahe_grid_spin, self.clahe_grid_slider,
-            self.preview_check,
-            self.preprocess_btn,
-            self.reset_btn
-        ]:
-            self.register_control(control)
+    def _update_from_intensity_slider(self, values):
+        """Update spinboxes when intensity range slider changes"""
+        min_val, max_val = values
+        self.min_spin.blockSignals(True)
+        self.max_spin.blockSignals(True)
 
-    def _initialize_controls(self):
-        """Initialize all UI controls"""
-        # Intensity controls
-        self.intensity_slider = QRangeSlider(Qt.Horizontal)
-        self.min_spin = QSpinBox()
-        self.max_spin = QSpinBox()
+        self.min_spin.setValue(min_val)
+        self.max_spin.setValue(max_val)
 
-        # Filter controls
-        self.median_size_spin = QSpinBox()
-        self.median_slider = QSlider(Qt.Horizontal)
+        self.current_min_intensity = min_val
+        self.current_max_intensity = max_val
 
-        self.gaussian_sigma_spin = QDoubleSpinBox()
-        self.gaussian_slider = QSlider(Qt.Horizontal)
+        self.min_spin.blockSignals(False)
+        self.max_spin.blockSignals(False)
 
-        self.clahe_clip_spin = QDoubleSpinBox()
-        self.clahe_clip_slider = QSlider(Qt.Horizontal)
-        self.clahe_grid_spin = QSpinBox()
-        self.clahe_grid_slider = QSlider(Qt.Horizontal)
+        self.update_parameters()
 
-        # Preview control
-        self.preview_check = QCheckBox("")
+    def _update_from_intensity_spinboxes(self):
+        """Update intensity range slider when spinboxes change"""
+        min_val = self.min_spin.value()
+        max_val = self.max_spin.value()
 
-        # Action buttons
-        self.preprocess_btn = QPushButton("Run Preprocessing")
-        self.reset_btn = QPushButton("Reset Parameters")
+        # Ensure min <= max
+        if min_val > max_val:
+            if self.sender() == self.min_spin:
+                max_val = min_val
+                self.max_spin.setValue(max_val)
+            else:
+                min_val = max_val
+                self.min_spin.setValue(min_val)
 
+        self.current_min_intensity = min_val
+        self.current_max_intensity = max_val
 
-    def _setup_ui(self):
-        """Initialize the user interface"""
-        # Create right side container
-        right_container = QWidget()
-        right_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        right_container.setFixedWidth(350)
+        self.intensity_slider.blockSignals(True)
+        self.intensity_slider.setValue((min_val, max_val))
+        self.intensity_slider.blockSignals(False)
 
-        right_layout = QVBoxLayout()
-        right_layout.setSpacing(8)
-        right_layout.setContentsMargins(6, 6, 6, 6)
-
-        # Create and add groups
-        right_layout.addWidget(self._create_intensity_group())
-        right_layout.addWidget(self._create_filter_group())
-
-        # Add preprocess button
-        right_layout.addWidget(self.preprocess_btn)
-
-        # Add status section
-        status_layout = QVBoxLayout()
-        self.progress_bar = QProgressBar()
-        self.status_label = QLabel("")
-        self.status_label.setWordWrap(True)
-        status_layout.addWidget(self.progress_bar)
-        status_layout.addWidget(self.status_label)
-        right_layout.addLayout(status_layout)
-
-        right_layout.addStretch()
-        right_container.setLayout(right_layout)
-
-        # Add to the main layout
-        self.main_layout.addWidget(right_container)
-        self.main_layout.addStretch(1)
-
-        # Register controls
-        self._register_controls()
-
-    def _update_ui_state(self, event=None):
-        """Update UI based on current state"""
-        active_layer = self._get_active_image_layer()
-        has_valid_image = (active_layer is not None and
-                           isinstance(active_layer, napari.layers.Image) and
-                           active_layer.data.ndim in [2, 3])
-
-        # Update button states
-        self.preprocess_btn.setEnabled(has_valid_image)
-        self.preview_check.setEnabled(has_valid_image)
-
-        # Disable preview if the original layer is gone or no longer selected
-        if self.preview_enabled and self.original_layer is not None:
-            if self.original_layer not in self.viewer.layers:
-                self.preview_check.setChecked(False)
-                self.preview_enabled = False
-                if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
-                    self.viewer.layers.remove(self.preview_layer)
-                self.preview_layer = None
-                self.original_layer = None
+        self.update_parameters()
 
     def toggle_preview(self, enabled: bool):
         """Toggle preview mode"""
@@ -477,29 +588,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
             self.original_layer = None  # Clear the original layer reference on error
             raise ProcessingError("Preview failed", str(e))
 
-    def _create_filter_group(self) -> QGroupBox:
-        """Create parameters group with all controls"""
-        group = QGroupBox("Parameters")
-        layout = QVBoxLayout()
-        layout.setSpacing(4)
-
-        # Create form layout for parameters
-        form_layout = QFormLayout()
-        form_layout.setSpacing(4)
-
-        # Create filter controls
-        self._create_filter_controls(form_layout)
-
-        # Add form layout to main layout
-        layout.addLayout(form_layout)
-
-        # Add reset button spanning full width
-        layout.addSpacing(8)  # Add some space before the reset button
-        layout.addWidget(self.reset_btn)
-
-        group.setLayout(layout)
-        return group
-
     def update_preview_frame(self, event: Optional[Event] = None):
         """Update the preview for the current frame"""
         if not self.preview_enabled or self.original_layer is None:
@@ -555,46 +643,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
         except Exception as e:
             raise ProcessingError("Preview failed", str(e))
 
-    def _update_from_intensity_slider(self, values):
-        """Update spinboxes when intensity range slider changes"""
-        min_val, max_val = values
-        self.min_spin.blockSignals(True)
-        self.max_spin.blockSignals(True)
-
-        self.min_spin.setValue(min_val)
-        self.max_spin.setValue(max_val)
-
-        self.current_min_intensity = min_val
-        self.current_max_intensity = max_val
-
-        self.min_spin.blockSignals(False)
-        self.max_spin.blockSignals(False)
-
-        self.update_parameters()
-
-    def _update_from_intensity_spinboxes(self):
-        """Update intensity range slider when spinboxes change"""
-        min_val = self.min_spin.value()
-        max_val = self.max_spin.value()
-
-        # Ensure min <= max
-        if min_val > max_val:
-            if self.sender() == self.min_spin:
-                max_val = min_val
-                self.max_spin.setValue(max_val)
-            else:
-                min_val = max_val
-                self.min_spin.setValue(min_val)
-
-        self.current_min_intensity = min_val
-        self.current_max_intensity = max_val
-
-        self.intensity_slider.blockSignals(True)
-        self.intensity_slider.setValue((min_val, max_val))
-        self.intensity_slider.blockSignals(False)
-
-        self.update_parameters()
-
     def run_preprocessing(self):
         """Run preprocessing on the entire stack"""
         if self.preview_enabled:
@@ -607,7 +655,7 @@ class PreprocessingWidget(BaseAnalysisWidget):
                 raise ProcessingError("No image layer selected")
 
             # Store the data and name from the active layer before processing
-            original_data = active_layer.data.copy()  # Make a copy of the data
+            original_data = active_layer.data.copy()
             original_name = active_layer.name
 
             # Disable controls during processing
@@ -615,57 +663,53 @@ class PreprocessingWidget(BaseAnalysisWidget):
             self._update_status("Starting preprocessing...", 0)
 
             # Get and validate the image data
-            stack = self._ensure_stack_format(original_data)  # Use the copied data
+            stack = self._ensure_stack_format(original_data)
             if not self._validate_input_data(stack):
                 raise ProcessingError("Invalid input data format")
 
-            total_frames = len(stack)
-            processed_frames = []
-            preprocessing_info = []
+            # Create worker and thread
+            self._preprocessing_thread = QThread()
+            self._preprocessing_worker = PreprocessingWorker(self.preprocessor, stack)
+            self._preprocessing_worker.moveToThread(self._preprocessing_thread)
 
-            # Process each frame
-            for frame_idx in range(total_frames):
-                progress = int(5 + (90 * frame_idx / total_frames))
-                self._update_status(f"Processing frame {frame_idx + 1}/{total_frames}", progress)
+            # Connect signals
+            self._preprocessing_thread.started.connect(self._preprocessing_worker.run)
+            self._preprocessing_worker.progress.connect(self._handle_preprocessing_progress)
+            self._preprocessing_worker.finished.connect(lambda results: self._handle_preprocessing_complete(results, original_name))
+            self._preprocessing_worker.error.connect(self._handle_preprocessing_error)
+            self._preprocessing_worker.finished.connect(self._preprocessing_thread.quit)
+            self._preprocessing_worker.finished.connect(self._preprocessing_worker.deleteLater)
+            self._preprocessing_thread.finished.connect(self._preprocessing_thread.deleteLater)
 
-                # Get frame
-                frame = stack[frame_idx].copy()
+            # Start preprocessing
+            self._preprocessing_thread.start()
 
-                # Convert to 8-bit and process
-                try:
-                    frame_8bit = self.preprocessor.convert_to_8bit(frame)
-                    processed_frame, frame_info = self.preprocessor.preprocess_frame(frame_8bit)
-                    processed_frames.append(processed_frame)
-                    preprocessing_info.append(frame_info)
-                except Exception as e:
-                    raise ProcessingError(
-                        f"Error processing frame {frame_idx}",
-                        str(e)
-                    )
+        except Exception as e:
+            self._handle_error(ProcessingError(
+                message="Failed to start preprocessing",
+                details=str(e),
+                component=self.__class__.__name__
+            ))
+            self._set_controls_enabled(True)
 
-            # Combine processed frames
-            processed_stack = np.stack(processed_frames, axis=0)
+    def _handle_preprocessing_progress(self, progress: int, message: str):
+        """Handle progress updates from worker"""
+        self._update_status(message, progress)
 
-            # Update visualization
+    def _handle_preprocessing_complete(self, results: tuple, original_name: str):
+        """Handle completion of preprocessing"""
+        try:
+            processed_stack, preprocessing_info = results
+
             self._update_status("Updating visualization...", 95)
 
-            # Store current selection
+            # Store current selection before adding new layer
             current_selected = list(self.viewer.layers.selection)
 
-            # Generate a unique name for the new layer
-            new_layer_name = 'Preprocessed'
-            if original_name == 'Preprocessed':
-                # If processing a 'Preprocessed' layer, add a number suffix
-                existing_names = [layer.name for layer in self.viewer.layers]
-                counter = 1
-                while f'Preprocessed_{counter}' in existing_names:
-                    counter += 1
-                new_layer_name = f'Preprocessed_{counter}'
-
-            # Add new preprocessed layer
+            # Add new preprocessed layer - napari will handle duplicate names automatically
             preprocessed_layer = self.viewer.add_image(
                 processed_stack,
-                name=new_layer_name,
+                name='Preprocessed',
                 visible=True,
                 metadata={'preprocessing_info': preprocessing_info}
             )
@@ -676,9 +720,7 @@ class PreprocessingWidget(BaseAnalysisWidget):
             # Restore original selection
             self.viewer.layers.selection.clear()
             for layer in current_selected:
-                if layer != active_layer:  # Don't reselect the original layer
-                    self.viewer.layers.selection.add(layer)
-            self.viewer.layers.selection.add(preprocessed_layer)  # Select the new layer
+                self.viewer.layers.selection.add(layer)
 
             # Store results
             self.data_manager.preprocessed_data = processed_stack
@@ -687,18 +729,30 @@ class PreprocessingWidget(BaseAnalysisWidget):
             self._update_status("Preprocessing complete", 100)
             self.preprocessing_completed.emit(processed_stack, preprocessing_info)
 
-        except ProcessingError as e:
-            self._handle_error(e)
         except Exception as e:
-            self._handle_error(ProcessingError(
-                "Preprocessing failed",
-                str(e),
-                self.__class__.__name__
-            ))
+            self._handle_preprocessing_error(e)
         finally:
             self._set_controls_enabled(True)
+
+    def _handle_preprocessing_error(self, error):
+        """Handle errors from worker"""
+        if isinstance(error, ProcessingError):
+            self._handle_error(error)
+        else:
+            self._handle_error(ProcessingError(
+                message="Error during preprocessing",
+                details=str(error),
+                component=self.__class__.__name__
+            ))
+        self._set_controls_enabled(True)
+
     def cleanup(self):
         """Clean up resources"""
+        # Clean up preprocessing thread
+        if self._preprocessing_thread and self._preprocessing_thread.isRunning():
+            self._preprocessing_thread.quit()
+            self._preprocessing_thread.wait()
+
         if self.preview_layer is not None and self.preview_layer in self.viewer.layers:
             self.viewer.layers.remove(self.preview_layer)
         self.preview_layer = None
