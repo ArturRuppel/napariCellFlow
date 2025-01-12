@@ -200,8 +200,8 @@ class SegmentationWidget(BaseAnalysisWidget):
         self.compute_diameter_check.setChecked(False)
 
         # Action buttons
-        self.run_btn = QPushButton("Run Segmentation")
-        self.run_stack_btn = QPushButton("Process Stack")
+        self.run_btn = QPushButton("Segment Frame")
+        self.run_stack_btn = QPushButton("Run Segmentation")
         self.export_btn = QPushButton("Export to Cellpose")
         self.import_btn = QPushButton("Import from Cellpose")
         self.reset_params_btn = QPushButton("Reset Parameters")

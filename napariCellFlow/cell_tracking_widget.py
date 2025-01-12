@@ -97,7 +97,7 @@ class CellTrackingWidget(BaseAnalysisWidget):
         self.gap_frames_spin.setToolTip("Maximum number of frames to look ahead for gap closing (0 to disable)")
 
         # Action buttons
-        self.track_btn = QPushButton("Track Cells")
+        self.track_btn = QPushButton("Run Tracking")
         self.reset_btn = QPushButton("Reset Parameters")
 
         logger.debug("Controls initialized with default parameters")
