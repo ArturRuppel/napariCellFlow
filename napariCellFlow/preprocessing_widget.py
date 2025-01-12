@@ -122,7 +122,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
         tooltip_label = QLabel("Note: Set parameter to 0 to disable a filter")
         tooltip_label.setStyleSheet("color: gray; font-style: italic;")
         form_layout.addRow(tooltip_label)
-        form_layout.addRow(QLabel(""))  # Add some spacing
 
         def create_parameter_group(
                 label: str,
@@ -131,7 +130,8 @@ class PreprocessingWidget(BaseAnalysisWidget):
                 default_val: float,
                 step: float = 1.0,
                 double: bool = False,
-                odd_only: bool = False
+                odd_only: bool = False,
+                tooltip: str = ""
         ):
             control_layout = QHBoxLayout()
 
@@ -142,6 +142,7 @@ class PreprocessingWidget(BaseAnalysisWidget):
             spin.setFixedWidth(80)
             if double:
                 spin.setDecimals(1)
+            spin.setToolTip(tooltip)
             control_layout.addWidget(spin)
 
             slider = QSlider(Qt.Horizontal)
@@ -156,37 +157,99 @@ class PreprocessingWidget(BaseAnalysisWidget):
             else:
                 slider.setRange(0, int(max_val * (1 / step)))
                 slider.setValue(int(default_val * (1 / step)))
+            slider.setToolTip(tooltip)
             control_layout.addWidget(slider, stretch=1)
 
-            form_layout.addRow(label + ":", control_layout)
+            # Create label with tooltip
+            label_widget = QLabel(label + ":")
+            label_widget.setToolTip(tooltip)
+            form_layout.addRow(label_widget, control_layout)
             return spin, slider
 
-        # Create controls with corrected ranges
+        # Create controls with tooltips
         self.median_size_spin, self.median_slider = create_parameter_group(
-            "Median Filter Size", 3, 15, 0, step=2, odd_only=True
+            "Median Filter Size", 3, 15, 0, step=2, odd_only=True,
+            tooltip="Size of median filter kernel (odd numbers only).\nReduces noise while preserving edges.\nSet to 0 to disable."
         )
 
         self.gaussian_sigma_spin, self.gaussian_slider = create_parameter_group(
-            "Gaussian Sigma", 0.1, 10.0, 0, step=0.1, double=True
+            "Gaussian Sigma", 0.1, 10.0, 0, step=0.1, double=True,
+            tooltip="Standard deviation of Gaussian blur.\nLarger values create more blur.\nSet to 0 to disable."
         )
 
         self.clahe_clip_spin, self.clahe_clip_slider = create_parameter_group(
-            "CLAHE Clip Limit", 0.1, 100.0, 0, step=0.1, double=True
+            "CLAHE Clip Limit", 0.1, 100.0, 0, step=0.1, double=True,
+            tooltip="Contrast limit for histogram equalization.\nHigher values allow more contrast enhancement.\nSet to 0 to disable CLAHE."
         )
 
         self.clahe_grid_spin, self.clahe_grid_slider = create_parameter_group(
-            "CLAHE Grid Size", 1, 64, 16
+            "CLAHE Grid Size", 1, 64, 16,
+            tooltip="Size of grid for adaptive histogram equalization.\nSmaller values give more local contrast enhancement."
         )
 
-        # Add preview checkbox
+        # Add preview checkbox with tooltip
         preview_layout = QHBoxLayout()
         self.preview_check.setText("")
         self.preview_check.setFixedWidth(30)
+        self.preview_check.setToolTip("Show live preview of preprocessing results.\nUpdates automatically when parameters change.")
         preview_layout.addWidget(self.preview_check)
         preview_label = QLabel("")
         preview_layout.addWidget(preview_label)
         preview_layout.addStretch()
         form_layout.addRow("Show Preview:", preview_layout)
+
+    def _create_intensity_group(self) -> QGroupBox:
+        """Create intensity range controls group"""
+        group = QGroupBox("Intensity Range")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+
+        # Configure intensity slider with tooltip
+        self.intensity_slider.setRange(0, 255)
+        self.intensity_slider.setValue((0, 255))
+        self.intensity_slider.setToolTip(
+            "Adjust minimum and maximum intensity values.\n"
+            "Values outside this range will be clipped."
+        )
+        layout.addWidget(self.intensity_slider)
+
+        # Configure spinboxes
+        spin_layout = QHBoxLayout()
+        spin_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Configure individual spinboxes with tooltips
+        for spin in (self.min_spin, self.max_spin):
+            spin.setRange(0, 255)
+            spin.setFixedWidth(80)
+            spin.setToolTip(
+                "Minimum/maximum intensity value.\n"
+                "Values outside this range will be clipped."
+            )
+
+        # Set initial values explicitly
+        self.min_spin.setValue(0)
+        self.max_spin.setValue(255)
+
+        # Left spinbox
+        spin_layout.addWidget(self.min_spin)
+
+        # Stretch to push max spinbox right
+        spin_layout.addStretch(1)
+
+        # Right spinbox - explicitly specify alignment
+        spin_layout.addWidget(self.max_spin, alignment=Qt.AlignRight)
+
+        layout.addLayout(spin_layout)
+        group.setLayout(layout)
+
+        # Add tooltip to the group itself
+        group.setToolTip(
+            "Set the intensity range for preprocessing.\n"
+            "Values below minimum will be set to 0.\n"
+            "Values above maximum will be set to 255."
+        )
+
+        return group
 
     def update_parameters(self):
         """Update preprocessing parameters from UI controls"""
@@ -434,43 +497,6 @@ class PreprocessingWidget(BaseAnalysisWidget):
         layout.addSpacing(8)  # Add some space before the reset button
         layout.addWidget(self.reset_btn)
 
-        group.setLayout(layout)
-        return group
-
-    def _create_intensity_group(self) -> QGroupBox:
-        """Create intensity range controls group"""
-        group = QGroupBox("Intensity Range")
-        layout = QVBoxLayout()
-        layout.setSpacing(4)
-
-        # Configure intensity slider
-        self.intensity_slider.setRange(0, 255)
-        self.intensity_slider.setValue((0, 255))
-        layout.addWidget(self.intensity_slider)
-
-        # Configure spinboxes
-        spin_layout = QHBoxLayout()
-        spin_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Configure individual spinboxes
-        for spin in (self.min_spin, self.max_spin):
-            spin.setRange(0, 255)
-            spin.setFixedWidth(80)
-
-        # Set initial values explicitly
-        self.min_spin.setValue(0)
-        self.max_spin.setValue(255)
-
-        # Left spinbox
-        spin_layout.addWidget(self.min_spin)
-
-        # Stretch to push max spinbox right
-        spin_layout.addStretch(1)
-
-        # Right spinbox - explicitly specify alignment
-        spin_layout.addWidget(self.max_spin, alignment=Qt.AlignRight)
-
-        layout.addLayout(spin_layout)
         group.setLayout(layout)
         return group
 
