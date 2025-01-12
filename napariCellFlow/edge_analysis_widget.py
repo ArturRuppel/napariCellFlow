@@ -42,6 +42,29 @@ class AnalysisWorker(QObject):
         except Exception as e:
             self.error.emit(e)
 
+class VisualizationWorker(QObject):
+    """Worker object to run visualization generation in background thread"""
+    progress = Signal(int, str)
+    finished = Signal()
+    error = Signal(Exception)
+
+    def __init__(self, visualizer, results, output_dir):
+        super().__init__()
+        self.visualizer = visualizer
+        self.results = results
+        self.output_dir = output_dir
+
+    def run(self):
+        try:
+            def progress_callback(stage: str, progress: float):
+                self.progress.emit(int(progress), stage)
+
+            self.visualizer.set_progress_callback(progress_callback)
+            self.visualizer.output_dir = self.output_dir
+            self.visualizer.create_visualizations(self.results)
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(e)
 
 class EdgeAnalysisWidget(BaseAnalysisWidget):
     """Widget for edge detection, analysis, and visualization operations."""
@@ -92,6 +115,8 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         # Initialize thread management
         self._analysis_thread = None
         self._analysis_worker = None
+        self._visualization_thread = None
+        self._visualization_worker = None
 
         # Initialize UI components
         self._initialize_controls()
@@ -104,6 +129,117 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self.viewer.layers.selection.events.changed.connect(self._update_ui_state)
 
         self._update_ui_state()
+
+    def _generate_visualizations(self):
+        """Generate visualizations based on current configuration"""
+        try:
+            # Check if any visualizations are enabled
+            enabled_vis = []
+            if self.visualization_config.tracking_plots_enabled:
+                enabled_vis.append("tracking plots")
+            if self.visualization_config.edge_detection_overlay:
+                enabled_vis.append("edge detection overlays")
+            if self.visualization_config.intercalation_events:
+                enabled_vis.append("intercalation events")
+            if self.visualization_config.edge_length_evolution:
+                enabled_vis.append("edge length evolution")
+            if self.visualization_config.create_example_gifs:
+                enabled_vis.append("example GIFs")
+
+            if not enabled_vis:
+                raise ProcessingError(
+                    "No visualizations enabled",
+                    "Please enable at least one visualization type."
+                )
+
+            # Get output directory and convert to absolute path
+            output_dir = self._get_output_directory()
+            if output_dir is None:
+                return
+
+            # Convert to absolute path
+            output_dir = output_dir.resolve()
+            self.visualization_config.output_dir = output_dir
+            self.visualizer.config = self.visualization_config
+
+            # Disable controls during processing
+            self._set_controls_enabled(False)
+            self._update_status(f"Starting visualization generation for: {', '.join(enabled_vis)}...", 0)
+
+            # Create and setup visualization worker and thread
+            self._visualization_thread = QThread()
+            self._visualization_worker = VisualizationWorker(
+                self.visualizer,
+                self._current_results,
+                output_dir
+            )
+            self._visualization_worker.moveToThread(self._visualization_thread)
+
+            # Connect signals
+            self._visualization_thread.started.connect(self._visualization_worker.run)
+            self._visualization_worker.progress.connect(self._handle_visualization_progress)
+            self._visualization_worker.finished.connect(self._handle_visualization_complete)
+            self._visualization_worker.error.connect(self._handle_visualization_error)
+            self._visualization_worker.finished.connect(self._visualization_thread.quit)
+            self._visualization_worker.finished.connect(self._visualization_worker.deleteLater)
+            self._visualization_thread.finished.connect(self._visualization_thread.deleteLater)
+
+            # Start visualization
+            self._visualization_thread.start()
+
+        except Exception as e:
+            self._handle_error(ProcessingError(
+                message="Failed to start visualization generation",
+                details=str(e),
+                component=self.__class__.__name__
+            ))
+            self._set_controls_enabled(True)
+    def _handle_visualization_progress(self, progress: int, message: str):
+        """Handle progress updates from visualization worker"""
+        self._update_status(message, progress)
+
+    def _handle_visualization_complete(self):
+        """Handle completion of visualization generation"""
+        try:
+            # Format success message with enabled visualization types
+            enabled_vis = []
+            if self.visualization_config.tracking_plots_enabled:
+                enabled_vis.append("tracking plots")
+            if self.visualization_config.edge_detection_overlay:
+                enabled_vis.append("edge detection overlays")
+            if self.visualization_config.intercalation_events:
+                enabled_vis.append("intercalation events")
+            if self.visualization_config.edge_length_evolution:
+                enabled_vis.append("edge length evolution")
+            if self.visualization_config.create_example_gifs:
+                enabled_vis.append("example GIFs")
+
+            vis_count = len(enabled_vis)
+            vis_types = "visualization" if vis_count == 1 else "visualizations"
+
+            self._update_status(
+                f"Successfully generated {vis_count} {vis_types} in {self.visualizer.output_dir}\n"
+                f"Types: {', '.join(enabled_vis)}",
+                100
+            )
+            self.visualization_completed.emit()
+
+        except Exception as e:
+            self._handle_visualization_error(e)
+        finally:
+            self._set_controls_enabled(True)
+
+    def _handle_visualization_error(self, error):
+        """Handle errors from visualization worker"""
+        if isinstance(error, ProcessingError):
+            self._handle_error(error)
+        else:
+            self._handle_error(ProcessingError(
+                message="Error during visualization generation",
+                details=str(error),
+                component=self.__class__.__name__
+            ))
+        self._set_controls_enabled(True)
 
     def _create_analysis_actions_group(self) -> QGroupBox:
         """Create analysis and results actions group"""
@@ -374,70 +510,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         finally:
             self._loading_config = False
 
-    def _generate_visualizations(self):
-        """Generate visualizations based on current configuration"""
-        try:
-            # Check if any visualizations are enabled
-            enabled_vis = []
-            if self.visualization_config.tracking_plots_enabled:
-                enabled_vis.append("tracking plots")
-            if self.visualization_config.edge_detection_overlay:
-                enabled_vis.append("edge detection overlays")
-            if self.visualization_config.intercalation_events:
-                enabled_vis.append("intercalation events")
-            if self.visualization_config.edge_length_evolution:
-                enabled_vis.append("edge length evolution")
-            if self.visualization_config.create_example_gifs:
-                enabled_vis.append("example GIFs")
-
-            if not enabled_vis:
-                raise ProcessingError(
-                    "No visualizations enabled",
-                    "Please enable at least one visualization type."
-                )
-
-            # Disable controls during processing
-            self._set_controls_enabled(False)
-            self._update_status(f"Starting visualization generation for: {', '.join(enabled_vis)}...", 0)
-
-            # Get output directory
-            output_dir = self._get_output_directory()
-            if output_dir is None:
-                return
-
-            # Update config with output directory
-            self.visualization_config.output_dir = output_dir
-
-            # Set up progress tracking
-            def progress_callback(stage: str, progress: float):
-                self._update_status(f"{stage}...", int(progress))
-
-            # Update visualizer with progress callback
-            self.visualizer.set_progress_callback(progress_callback)
-
-            # Generate visualizations
-            self.visualizer.create_visualizations(self._current_results)
-
-            # Format success message with details
-            vis_count = len(enabled_vis)
-            vis_types = "visualization" if vis_count == 1 else "visualizations"
-            self._update_status(
-                f"Successfully generated {vis_count} {vis_types} in {output_dir}\n"
-                f"Types: {', '.join(enabled_vis)}",
-                100
-            )
-            self.visualization_completed.emit()
-
-        except ProcessingError as e:
-            self._handle_error(e)
-        except Exception as e:
-            self._handle_error(ProcessingError(
-                "Visualization generation failed",
-                str(e),
-                self.__class__.__name__
-            ))
-        finally:
-            self._set_controls_enabled(True)
     def _get_output_directory(self) -> Optional[Path]:
         """Show directory dialog for selecting output location"""
         dialog = QFileDialog(self)
@@ -567,21 +639,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 component=self.__class__.__name__
             ))
         self._set_controls_enabled(True)
-
-    def cleanup(self):
-        """Clean up resources"""
-        if self._analysis_thread and self._analysis_thread.isRunning():
-            self._analysis_thread.quit()
-            self._analysis_thread.wait()
-
-        if self.visualization_manager:
-            self.visualization_manager.clear_edge_layers()
-
-        self._current_results = None
-        self._current_boundaries = None
-        self._update_ui_state()
-
-        super().cleanup()
 
     def update_parameters(self):
         """Update edge analysis parameters from UI controls"""
@@ -842,3 +899,24 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         if dialog.exec_():
             return Path(dialog.selectedFiles()[0])
         return None
+
+    def cleanup(self):
+        """Clean up resources"""
+        # Clean up analysis thread
+        if self._analysis_thread and self._analysis_thread.isRunning():
+            self._analysis_thread.quit()
+            self._analysis_thread.wait()
+
+        # Clean up visualization thread
+        if self._visualization_thread and self._visualization_thread.isRunning():
+            self._visualization_thread.quit()
+            self._visualization_thread.wait()
+
+        if self.visualization_manager:
+            self.visualization_manager.clear_edge_layers()
+
+        self._current_results = None
+        self._current_boundaries = None
+        self._update_ui_state()
+
+        super().cleanup()
