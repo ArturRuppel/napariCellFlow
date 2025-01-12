@@ -120,7 +120,7 @@ class SegmentationWidget(BaseAnalysisWidget):
         self.custom_model_btn = QPushButton("Load Custom...")
         self.custom_model_btn.setEnabled(False)
         self.custom_model_btn.setToolTip(
-            "Load a custom trained Cellpose model (.pth file)\n"
+            "Load a custom trained Cellpose model\n"
             "Only enabled when 'custom' model type is selected"
         )
 
