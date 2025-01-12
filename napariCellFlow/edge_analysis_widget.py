@@ -211,7 +211,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
         self.generate_vis_btn.setEnabled(False)
 
-
         # Add status section
         status_layout = QVBoxLayout()
         self.progress_bar = QProgressBar()
@@ -379,14 +378,19 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         """Generate visualizations based on current configuration"""
         try:
             # Check if any visualizations are enabled
-            any_vis_enabled = (
-                    self.visualization_config.tracking_plots_enabled or
-                    self.visualization_config.edge_detection_overlay or
-                    self.visualization_config.intercalation_events or
-                    self.visualization_config.edge_length_evolution
-            )
+            enabled_vis = []
+            if self.visualization_config.tracking_plots_enabled:
+                enabled_vis.append("tracking plots")
+            if self.visualization_config.edge_detection_overlay:
+                enabled_vis.append("edge detection overlays")
+            if self.visualization_config.intercalation_events:
+                enabled_vis.append("intercalation events")
+            if self.visualization_config.edge_length_evolution:
+                enabled_vis.append("edge length evolution")
+            if self.visualization_config.create_example_gifs:
+                enabled_vis.append("example GIFs")
 
-            if not any_vis_enabled:
+            if not enabled_vis:
                 raise ProcessingError(
                     "No visualizations enabled",
                     "Please enable at least one visualization type."
@@ -394,23 +398,34 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
             # Disable controls during processing
             self._set_controls_enabled(False)
-            self._update_status("Starting visualization generation...", 0)
+            self._update_status(f"Starting visualization generation for: {', '.join(enabled_vis)}...", 0)
 
             # Get output directory
             output_dir = self._get_output_directory()
             if output_dir is None:
                 return
 
-            logger.debug(f"Selected output directory: {output_dir}")
-
             # Update config with output directory
             self.visualization_config.output_dir = output_dir
 
+            # Set up progress tracking
+            def progress_callback(stage: str, progress: float):
+                self._update_status(f"{stage}...", int(progress))
+
+            # Update visualizer with progress callback
+            self.visualizer.set_progress_callback(progress_callback)
+
             # Generate visualizations
-            self._update_status("Generating visualizations...", 30)
             self.visualizer.create_visualizations(self._current_results)
 
-            self._update_status(f"Visualizations generated successfully in {output_dir}", 100)
+            # Format success message with details
+            vis_count = len(enabled_vis)
+            vis_types = "visualization" if vis_count == 1 else "visualizations"
+            self._update_status(
+                f"Successfully generated {vis_count} {vis_types} in {output_dir}\n"
+                f"Types: {', '.join(enabled_vis)}",
+                100
+            )
             self.visualization_completed.emit()
 
         except ProcessingError as e:
@@ -423,7 +438,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             ))
         finally:
             self._set_controls_enabled(True)
-
     def _get_output_directory(self) -> Optional[Path]:
         """Show directory dialog for selecting output location"""
         dialog = QFileDialog(self)
@@ -448,9 +462,15 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                            isinstance(active_layer, napari.layers.Labels) and
                            active_layer.data.ndim in [2, 3])
 
+        # Check for valid results data
+        has_valid_results = (self._current_results is not None and
+                             hasattr(self._current_results, 'edges') and
+                             bool(self._current_results.edges))
+
         # Update button states
         self.analyze_btn.setEnabled(has_valid_input)
-        self.save_btn.setEnabled(self._current_results is not None)
+        self.save_btn.setEnabled(has_valid_results)
+        self.generate_vis_btn.setEnabled(has_valid_results)
 
     def run_analysis(self):
         selected = self._get_active_labels_layer()
@@ -559,6 +579,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
         self._current_results = None
         self._current_boundaries = None
+        self._update_ui_state()
 
         super().cleanup()
 
