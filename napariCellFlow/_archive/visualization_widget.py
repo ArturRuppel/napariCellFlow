@@ -9,11 +9,11 @@ from qtpy.QtWidgets import (
     QLabel
 )
 
-from .base_widget import BaseAnalysisWidget, ProcessingError
-from .data_manager import DataManager
-from .structure import VisualizationConfig
-from .visualization import Visualizer
-from .visualization_manager import VisualizationManager
+from napariCellFlow.base_widget import BaseAnalysisWidget, ProcessingError
+from napariCellFlow.data_manager import DataManager
+from napariCellFlow.structure import VisualizationConfig
+from napariCellFlow.edge_analysis_visualization import Visualizer
+from napariCellFlow.visualization_manager import VisualizationManager
 
 logger = logging.getLogger(__name__)
 

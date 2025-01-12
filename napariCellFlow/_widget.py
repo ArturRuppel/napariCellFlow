@@ -11,7 +11,6 @@ from napariCellFlow.segmentation_widget import SegmentationWidget
 from napariCellFlow.data_manager import DataManager
 from napariCellFlow.visualization_manager import VisualizationManager
 from napariCellFlow.edge_analysis_widget import EdgeAnalysisWidget
-from napariCellFlow.visualization_widget import VisualizationWidget
 
 logger = logging.getLogger(__name__)
 
@@ -68,19 +67,12 @@ class napariCellFlow(QWidget):
             self.visualization_manager
         )
 
-        # Initialize new visualization widget
-        self.visualization_widget = VisualizationWidget(
-            self.viewer,
-            self.data_manager,
-            self.visualization_manager
-        )
 
         # Add widgets to tabs
         tabs.addTab(self.preprocessing_widget, "Preprocessing")
         tabs.addTab(self.segmentation_widget, "Segmentation")
         tabs.addTab(self.tracking_widget, "Cell Tracking")
         tabs.addTab(self.edge_analysis_widget, "Edge Analysis")
-        tabs.addTab(self.visualization_widget, "Visualization")
 
         # Add tabs to container
         container_layout.addWidget(tabs)
@@ -110,9 +102,7 @@ class napariCellFlow(QWidget):
         self.segmentation_widget.processing_completed.connect(self._on_segmentation_completed)
         self.segmentation_widget.processing_failed.connect(self._on_segmentation_failed)
 
-        # Connect visualization widget signals to handle visualization events
-        self.visualization_widget.visualization_completed.connect(self._on_visualization_completed)
-        self.visualization_widget.visualization_failed.connect(self._on_visualization_failed)
+
 
     def _on_preprocessing_completed(self, processed_stack, preprocessing_info):
         """Handle completion of preprocessing"""
@@ -144,12 +134,4 @@ class napariCellFlow(QWidget):
         logger.error(f"Tracking failed: {error_msg}")
         QMessageBox.critical(self, "Error", f"Tracking failed: {error_msg}")
 
-    def _on_visualization_completed(self):
-        """Handle completion of visualization generation"""
-        logger.info("Visualization generation completed successfully")
-        QMessageBox.information(self, "Success", "Visualizations generated successfully")
 
-    def _on_visualization_failed(self, error_msg):
-        """Handle visualization failure"""
-        logger.error(f"Visualization failed: {error_msg}")
-        QMessageBox.critical(self, "Error", f"Visualization generation failed: {error_msg}")

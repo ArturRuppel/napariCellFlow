@@ -1,9 +1,10 @@
-from typing import Optional, Tuple
-import numpy as np
-from qtpy.QtWidgets import QWidget, QVBoxLayout
-from qtpy.QtCore import Signal
-import napari
 import logging
+from typing import Optional
+
+import napari
+import numpy as np
+from qtpy.QtCore import Signal
+from qtpy.QtWidgets import QWidget, QVBoxLayout
 
 logger = logging.getLogger(__name__)
 
