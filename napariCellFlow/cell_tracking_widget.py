@@ -2,10 +2,10 @@ import logging
 
 import napari
 import numpy as np
-from qtpy.QtCore import Signal
+from qtpy.QtCore import Signal, QThread, QObject
 from qtpy.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QSizePolicy, QProgressBar, QLabel,
-    QFormLayout, QDoubleSpinBox, QSpinBox, QCheckBox, QPushButton
+    QWidget, QVBoxLayout, QGroupBox, QSizePolicy, QProgressBar, QLabel,
+    QFormLayout, QDoubleSpinBox, QSpinBox, QPushButton
 )
 
 from .base_widget import BaseAnalysisWidget, ProcessingError
@@ -15,6 +15,36 @@ from .structure import AnalysisConfig, TrackingParameters
 logger = logging.getLogger(__name__)
 
 
+class CellTrackingWorker(QObject):
+    """Worker object to run cell tracking in background thread"""
+    progress = Signal(float, str)  # Emits progress percentage and status message
+    finished = Signal(object)  # Emits tracked labels
+    error = Signal(Exception)
+
+    def __init__(self, tracker: CellTracker, stack: np.ndarray):
+        super().__init__()
+        self.tracker = tracker
+        self.stack = stack
+
+    def run(self):
+        """Execute cell tracking in background thread"""
+        try:
+            # Configure progress callback
+            def update_progress(progress: float, message: str = ""):
+                self.progress.emit(progress, message)
+
+            self.tracker.set_progress_callback(update_progress)
+
+            # Run tracking
+            tracked_labels = self.tracker.track_cells(self.stack)
+
+            if tracked_labels is None:
+                raise ProcessingError("Tracking produced no results")
+
+            self.finished.emit(tracked_labels)
+
+        except Exception as e:
+            self.error.emit(e)
 class CellTrackingWidget(BaseAnalysisWidget):
     """Widget for cell tracking operations with interactive parameters."""
 
@@ -36,6 +66,10 @@ class CellTrackingWidget(BaseAnalysisWidget):
         self.tracking_params = TrackingParameters()
         self.tracker = CellTracker(AnalysisConfig())
 
+        # Initialize thread management
+        self._tracking_thread = None
+        self._tracking_worker = None
+
         # Initialize controls
         self._initialize_controls()
 
@@ -52,6 +86,52 @@ class CellTrackingWidget(BaseAnalysisWidget):
         self._update_ui_state()
 
         logger.debug("CellTrackingWidget initialized")
+
+    def _handle_tracking_progress(self, progress: float, message: str):
+        """Handle progress updates from worker"""
+        self._update_status(message, int(progress))
+
+    def _handle_tracking_complete(self, tracked_labels: np.ndarray):
+        """Handle completion of tracking"""
+        try:
+            # Store and visualize results
+            self.data_manager.tracked_data = tracked_labels
+            self.visualization_manager.update_tracking_visualization(tracked_labels)
+
+            self._update_status("Cell tracking complete", 100)
+            self.processing_completed.emit(tracked_labels)
+            logger.debug("Cell tracking workflow completed successfully")
+
+        except Exception as e:
+            logger.error(f"Error handling tracking completion: {str(e)}", exc_info=True)
+            self._handle_error(ProcessingError(
+                "Failed to process tracking results",
+                str(e),
+                self.__class__.__name__
+            ))
+        finally:
+            self._set_controls_enabled(True)
+
+    def _handle_tracking_error(self, error: Exception):
+        """Handle errors from worker"""
+        if isinstance(error, ProcessingError):
+            self._handle_error(error)
+        else:
+            self._handle_error(ProcessingError(
+                "Cell tracking failed",
+                str(error),
+                self.__class__.__name__
+            ))
+        self._set_controls_enabled(True)
+
+    def cleanup(self):
+        """Clean up resources"""
+        # Clean up tracking thread
+        if self._tracking_thread and self._tracking_thread.isRunning():
+            self._tracking_thread.quit()
+            self._tracking_thread.wait()
+
+        super().cleanup()
 
     def _update_ui_state(self, event=None):
         """Update UI based on current state"""
@@ -238,6 +318,7 @@ class CellTrackingWidget(BaseAnalysisWidget):
 
         except ValueError as e:
             raise ProcessingError("Invalid parameters", str(e))
+
     def reset_parameters(self):
         """Reset all parameters to defaults"""
         # Create new default parameters
@@ -265,10 +346,6 @@ class CellTrackingWidget(BaseAnalysisWidget):
         self._update_status("Parameters reset to defaults")
         self.update_parameters()
 
-    def cleanup(self):
-        """Clean up resources"""
-        super().cleanup()
-
     def run_analysis(self):
         """Run cell tracking with current parameters"""
         try:
@@ -290,13 +367,6 @@ class CellTrackingWidget(BaseAnalysisWidget):
             self._validate_stack(stack)
             self._set_controls_enabled(False)
 
-            # Set up progress callback
-            def update_progress(progress: float, message: str = ""):
-                self._update_status(message, int(progress))
-
-            # Configure tracker with progress callback
-            self.tracker.set_progress_callback(update_progress)
-
             # Ensure proper data format
             try:
                 stack = self._ensure_stack_format(stack)
@@ -307,25 +377,22 @@ class CellTrackingWidget(BaseAnalysisWidget):
                     f"Error formatting input data: {str(e)}"
                 )
 
-            # Run tracking
-            try:
-                tracked_labels = self.tracker.track_cells(stack)
-                if tracked_labels is None:
-                    raise ProcessingError("Tracking produced no results")
-            except Exception as e:
-                logger.error(f"Tracking algorithm failed: {str(e)}", exc_info=True)
-                raise ProcessingError(
-                    "Tracking algorithm failed",
-                    f"Error during cell tracking: {str(e)}"
-                )
+            # Create worker and thread
+            self._tracking_thread = QThread()
+            self._tracking_worker = CellTrackingWorker(self.tracker, stack)
+            self._tracking_worker.moveToThread(self._tracking_thread)
 
-            # Store and visualize results
-            self.data_manager.tracked_data = tracked_labels
-            self.visualization_manager.update_tracking_visualization(tracked_labels)
+            # Connect signals
+            self._tracking_thread.started.connect(self._tracking_worker.run)
+            self._tracking_worker.progress.connect(self._handle_tracking_progress)
+            self._tracking_worker.finished.connect(self._handle_tracking_complete)
+            self._tracking_worker.error.connect(self._handle_tracking_error)
+            self._tracking_worker.finished.connect(self._tracking_thread.quit)
+            self._tracking_worker.finished.connect(self._tracking_worker.deleteLater)
+            self._tracking_thread.finished.connect(self._tracking_thread.deleteLater)
 
-            self._update_status("Cell tracking complete", 100)
-            self.processing_completed.emit(tracked_labels)
-            logger.debug("Cell tracking workflow completed successfully")
+            # Start tracking
+            self._tracking_thread.start()
 
         except ProcessingError as e:
             logger.error(f"Processing error: {e.message}", exc_info=True)
@@ -338,6 +405,3 @@ class CellTrackingWidget(BaseAnalysisWidget):
                 self.__class__.__name__
             )
             self._handle_error(error)
-        finally:
-            self._set_controls_enabled(True)
-            logger.debug("Controls re-enabled")

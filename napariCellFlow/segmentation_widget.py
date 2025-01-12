@@ -229,11 +229,7 @@ class SegmentationWidget(BaseAnalysisWidget):
         )
 
         self.reset_params_btn = QPushButton("Reset Parameters")
-        self.reset_params_btn.setToolTip(
-            "Reset all parameters to default values\n"
-            "Useful if segmentation results are poor\n"
-            "Will not affect existing segmentations"
-        )
+
 
     def _register_controls(self):
         """Register all controls with base widget"""
