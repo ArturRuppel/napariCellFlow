@@ -77,7 +77,7 @@ class Visualizer:
 
             # Generate tracking visualizations
             if self.config.tracking_plots_enabled and segmentation_stack is not None:
-                tracking_dir = base_dir / "tracking_output"
+                tracking_dir = base_dir
                 tracking_dir.mkdir(exist_ok=True)
 
                 # Cell trajectories plot
@@ -95,7 +95,7 @@ class Visualizer:
             # Edge detection visualization
             if self.config.edge_detection_overlay:
                 self._update_progress("Generating edge detection overlays", current_stage / total_stages * 100)
-                edge_dir = base_dir / "edge_output"
+                edge_dir = base_dir
                 edge_dir.mkdir(exist_ok=True)
 
                 boundaries_by_frame = self._extract_boundaries(results)
@@ -107,7 +107,7 @@ class Visualizer:
             # Intercalation events
             if self.config.intercalation_events:
                 self._update_progress("Creating intercalation visualizations", current_stage / total_stages * 100)
-                intercalation_dir = base_dir / "intercalation_output"
+                intercalation_dir = base_dir
                 intercalation_dir.mkdir(exist_ok=True)
 
                 all_events = self._collect_intercalation_events(results)
@@ -120,11 +120,9 @@ class Visualizer:
             # Edge length evolution
             if self.config.edge_length_evolution:
                 self._update_progress("Generating edge length evolution plots", current_stage / total_stages * 100)
-                edge_analysis_dir = base_dir / "edge_analysis_output"
+                edge_analysis_dir = base_dir
                 edge_analysis_dir.mkdir(exist_ok=True)
 
-                # Main length evolution plot
-                self.plot_edge_length_tracks(results.edges, edge_analysis_dir / "all_edges_length_evolution.png")
                 current_stage += 1
 
                 # Example GIFs for edges with intercalations
@@ -169,7 +167,7 @@ class Visualizer:
 
     def _create_example_visualizations(self, results: 'EdgeAnalysisResults', output_dir: Path) -> None:
         """Create example visualizations for edges with intercalations"""
-        example_dir = output_dir / "examples"
+        example_dir = output_dir
         example_dir.mkdir(exist_ok=True)
 
         # Find edges with intercalations
@@ -184,8 +182,6 @@ class Visualizer:
             if i >= self.config.max_example_gifs:
                 break
 
-            output_path = example_dir / f"edge_{edge_id}_analysis.png"
-            self.plot_edge_analysis(edge_data, output_path)
 
             # If segmentation data is available, create animation
             segmentation_stack = self._get_segmentation_data()
@@ -365,28 +361,28 @@ class Visualizer:
         plt.savefig(output_path)
         plt.close()
 
-    def plot_edge_analysis(self, edge_data: 'EdgeData', output_path: Path):
-        """Create a comprehensive visualization of edge evolution"""
-        plt.figure(figsize=self.config.figure_size)
-
-        # Plot length evolution
-        plt.plot(edge_data.frames, edge_data.lengths, '-b', label='Edge length')
-
-        # Mark intercalation events
-        if hasattr(edge_data, 'intercalations') and edge_data.intercalations:
-            event_frames = [event.frame for event in edge_data.intercalations]
-            event_lengths = [edge_data.lengths[edge_data.frames.index(frame)]
-                             for frame in event_frames]
-            plt.scatter(event_frames, event_lengths, c='red', s=100,
-                        label='Intercalation events')
-
-        plt.xlabel('Frame')
-        plt.ylabel('Edge Length')
-        plt.title(f'Edge {edge_data.edge_id} Analysis')
-        plt.legend()
-        plt.grid(True)
-        plt.savefig(output_path)
-        plt.close()
+    # def plot_edge_analysis(self, edge_data: 'EdgeData', output_path: Path):
+    #     """Create a comprehensive visualization of edge evolution"""
+    #     plt.figure(figsize=self.config.figure_size)
+    #
+    #     # Plot length evolution
+    #     plt.plot(edge_data.frames, edge_data.lengths, '-b', label='Edge length')
+    #
+    #     # Mark intercalation events
+    #     if hasattr(edge_data, 'intercalations') and edge_data.intercalations:
+    #         event_frames = [event.frame for event in edge_data.intercalations]
+    #         event_lengths = [edge_data.lengths[edge_data.frames.index(frame)]
+    #                          for frame in event_frames]
+    #         plt.scatter(event_frames, event_lengths, c='red', s=100,
+    #                     label='Intercalation events')
+    #
+    #     plt.xlabel('Frame')
+    #     plt.ylabel('Edge Length')
+    #     plt.title(f'Edge {edge_data.edge_id} Analysis')
+    #     plt.legend()
+    #     plt.grid(True)
+    #     plt.savefig(output_path)
+    #     plt.close()
 
     def _create_custom_colormap(self, start_color: Tuple[float, float, float, float] = (0, 0, 0, 1)):
         """Create a custom colormap starting with a specific color"""
@@ -613,66 +609,66 @@ class Visualizer:
         anim.save(str(output_path), writer='pillow')
         plt.close()
         logger.debug("Intercalation animation completed")
-    def plot_edge_length_tracks(self, trajectories: Dict[int, 'EdgeData'],
-                                output_path: Path) -> None:
-        """Plot edge length trajectories in groups of 10."""
-        edge_ids = sorted(trajectories.keys())
-        num_groups = (len(edge_ids) + 9) // 10
-
-        fig, axes = plt.subplots(num_groups, 1, figsize=(15, 5 * num_groups))
-        fig.patch.set_facecolor('white')
-
-        if num_groups > 1:
-            for ax in axes.flatten():
-                ax.set_facecolor('white')
-                ax.spines['bottom'].set_color('black')
-                ax.spines['top'].set_color('black')
-                ax.spines['left'].set_color('black')
-                ax.spines['right'].set_color('black')
-                ax.tick_params(colors='black')
-        else:
-            if not isinstance(axes, np.ndarray):
-                axes = np.array([axes])
-            axes[0].set_facecolor('white')
-            axes[0].spines['bottom'].set_color('black')
-            axes[0].spines['top'].set_color('black')
-            axes[0].spines['left'].set_color('black')
-            axes[0].spines['right'].set_color('black')
-            axes[0].tick_params(colors='black')
-
-        for group_idx in range(num_groups):
-            ax = axes[group_idx] if num_groups > 1 else axes[0]
-            start_idx = group_idx * 10
-            group_edges = edge_ids[start_idx:start_idx + 10]
-
-            for edge_id in group_edges:
-                edge_data = trajectories[edge_id]
-                # Check for intercalations using the intercalations list
-                has_intercalations = (hasattr(edge_data, 'intercalations') and
-                                      edge_data.intercalations is not None and
-                                      len(edge_data.intercalations) > 0)
-
-                color = 'red' if has_intercalations else 'gray'
-                ax.plot(edge_data.frames, edge_data.lengths, '-',
-                        color=color, label=f'Edge {edge_id}')
-
-                # Plot vertical lines for intercalation events
-                if has_intercalations:
-                    for event in edge_data.intercalations:
-                        ax.axvline(x=event.frame, color='blue',
-                                   linestyle='--', alpha=0.3)
-
-                ax.set_xlabel('Frame', color='black')
-                ax.set_ylabel('Edge Length (µm)', color='black')
-                ax.grid(True, alpha=0.3)
-                ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-                ax.set_title(f'Edges {start_idx + 1}-{min(start_idx + 10, len(edge_ids))}',
-                             color='black')
-
-        plt.tight_layout()
-        plt.savefig(output_path, bbox_inches='tight', dpi=self.config.dpi,
-                    facecolor='white', edgecolor='none')
-        plt.close()
+    # def plot_edge_length_tracks(self, trajectories: Dict[int, 'EdgeData'],
+    #                             output_path: Path) -> None:
+    #     """Plot edge length trajectories in groups of 10."""
+    #     edge_ids = sorted(trajectories.keys())
+    #     num_groups = (len(edge_ids) + 9) // 10
+    #
+    #     fig, axes = plt.subplots(num_groups, 1, figsize=(15, 5 * num_groups))
+    #     fig.patch.set_facecolor('white')
+    #
+    #     if num_groups > 1:
+    #         for ax in axes.flatten():
+    #             ax.set_facecolor('white')
+    #             ax.spines['bottom'].set_color('black')
+    #             ax.spines['top'].set_color('black')
+    #             ax.spines['left'].set_color('black')
+    #             ax.spines['right'].set_color('black')
+    #             ax.tick_params(colors='black')
+    #     else:
+    #         if not isinstance(axes, np.ndarray):
+    #             axes = np.array([axes])
+    #         axes[0].set_facecolor('white')
+    #         axes[0].spines['bottom'].set_color('black')
+    #         axes[0].spines['top'].set_color('black')
+    #         axes[0].spines['left'].set_color('black')
+    #         axes[0].spines['right'].set_color('black')
+    #         axes[0].tick_params(colors='black')
+    #
+    #     for group_idx in range(num_groups):
+    #         ax = axes[group_idx] if num_groups > 1 else axes[0]
+    #         start_idx = group_idx * 10
+    #         group_edges = edge_ids[start_idx:start_idx + 10]
+    #
+    #         for edge_id in group_edges:
+    #             edge_data = trajectories[edge_id]
+    #             # Check for intercalations using the intercalations list
+    #             has_intercalations = (hasattr(edge_data, 'intercalations') and
+    #                                   edge_data.intercalations is not None and
+    #                                   len(edge_data.intercalations) > 0)
+    #
+    #             color = 'red' if has_intercalations else 'gray'
+    #             ax.plot(edge_data.frames, edge_data.lengths, '-',
+    #                     color=color, label=f'Edge {edge_id}')
+    #
+    #             # Plot vertical lines for intercalation events
+    #             if has_intercalations:
+    #                 for event in edge_data.intercalations:
+    #                     ax.axvline(x=event.frame, color='blue',
+    #                                linestyle='--', alpha=0.3)
+    #
+    #             ax.set_xlabel('Frame', color='black')
+    #             ax.set_ylabel('Edge Length (µm)', color='black')
+    #             ax.grid(True, alpha=0.3)
+    #             ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    #             ax.set_title(f'Edges {start_idx + 1}-{min(start_idx + 10, len(edge_ids))}',
+    #                          color='black')
+    #
+    #     plt.tight_layout()
+    #     plt.savefig(output_path, bbox_inches='tight', dpi=self.config.dpi,
+    #                 facecolor='white', edgecolor='none')
+    #     plt.close()
 
     def create_edge_evolution_animation(self, segmentation_stack: np.ndarray,
                                         trajectory: 'EdgeTrajectory',
