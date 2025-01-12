@@ -280,6 +280,276 @@ class SegmentationWidget(BaseAnalysisWidget):
             self.viewer.layers.events.removed.connect(self._update_ui_state)
             self.viewer.layers.selection.events.changed.connect(self._update_ui_state)
 
+    def _setup_ui(self):
+        """Initialize the user interface"""
+        # Create right side container
+        right_container = QWidget()
+        right_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
+        right_container.setFixedWidth(350)
+
+        right_layout = QVBoxLayout()
+        right_layout.setSpacing(8)
+        right_layout.setContentsMargins(6, 6, 6, 6)
+
+        # Model Selection Section
+        model_group = QGroupBox("Model Selection")
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("Model:"))
+        model_layout.addWidget(self.model_combo)
+        model_layout.addWidget(self.custom_model_btn)
+        model_group.setLayout(model_layout)
+        right_layout.addWidget(model_group)
+
+        # Parameters Section
+        params_group = QGroupBox("Parameters")
+        params_layout = QVBoxLayout()
+        form_layout = QFormLayout()
+        form_layout.addRow("Cell Diameter:", self.diameter_spin)
+        form_layout.addRow("Flow Threshold:", self.flow_spin)
+        form_layout.addRow("Cell Probability:", self.prob_spin)
+        form_layout.addRow("Min Size:", self.size_spin)
+        params_layout.addLayout(form_layout)
+
+        # Add scale disk checkbox and estimate diameter button
+        params_layout.addWidget(self.show_scale_disk_check)
+        params_layout.addWidget(self.reset_params_btn)
+
+        params_group.setLayout(params_layout)
+        right_layout.addWidget(params_group)
+
+        # Options Section
+        options_group = QGroupBox("Advanced Options")
+        options_layout = QVBoxLayout()
+        options_layout.addWidget(self.gpu_check)
+        options_layout.addWidget(self.normalize_check)
+        options_layout.addWidget(self.compute_diameter_check)
+        options_group.setLayout(options_layout)
+        right_layout.addWidget(options_group)
+
+        # Action Buttons
+        action_group = QGroupBox("Actions")
+        action_layout = QVBoxLayout()
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.run_btn)
+        button_layout.addWidget(self.run_stack_btn)
+        action_layout.addLayout(button_layout)
+        action_group.setLayout(action_layout)
+        right_layout.addWidget(action_group)
+
+        # Initialize and add correction widget
+        self.correction_widget = CellCorrectionWidget(
+            self.viewer,
+            self.data_manager,
+            self.visualization_manager
+        )
+        correction_group = QGroupBox("Manual Correction Tools")
+        correction_layout = QVBoxLayout()
+        correction_layout.addWidget(self.correction_widget)
+        correction_group.setLayout(correction_layout)
+        right_layout.addWidget(correction_group)
+
+        # Cellpose Integration
+        cellpose_group = QGroupBox("Cellpose Integration")
+        cellpose_layout = QVBoxLayout()
+        info_label = QLabel(
+            "Export segmentation data for model training in Cellpose, "
+            "then import the processed results back."
+        )
+        info_label.setWordWrap(True)
+        cellpose_layout.addWidget(info_label)
+        cellpose_buttons = QHBoxLayout()
+        cellpose_buttons.addWidget(self.export_btn)
+        cellpose_buttons.addWidget(self.import_btn)
+        cellpose_layout.addLayout(cellpose_buttons)
+        cellpose_group.setLayout(cellpose_layout)
+        right_layout.addWidget(cellpose_group)
+
+        # Add status section
+        status_layout = QVBoxLayout()
+        self.progress_bar = QProgressBar()
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        status_layout.addWidget(self.progress_bar)
+        status_layout.addWidget(self.status_label)
+        right_layout.addLayout(status_layout)
+
+        right_layout.addStretch()
+        right_container.setLayout(right_layout)
+
+        # Add to main layout
+        self.main_layout.addWidget(right_container)
+        self.main_layout.addStretch(1)
+
+        # Register controls
+        self._register_controls()
+
+    def _create_model_group(self) -> QGroupBox:
+        """Create model selection controls group"""
+        group = QGroupBox("Model Selection")
+        layout = QHBoxLayout()
+        layout.setSpacing(4)
+
+        layout.addWidget(QLabel("Model:"))
+        layout.addWidget(self.model_combo)
+        layout.addWidget(self.custom_model_btn)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_parameter_group(self) -> QGroupBox:
+        """Create segmentation parameters group"""
+        group = QGroupBox("Parameters")
+        form_layout = QFormLayout()
+        form_layout.setSpacing(4)
+
+        # Configure diameter control
+        self.diameter_spin.setRange(0.1, 1000.0)
+        self.diameter_spin.setValue(95.0)
+        self.diameter_spin.setToolTip("Expected diameter of cells in pixels")
+        form_layout.addRow("Cell Diameter:", self.diameter_spin)
+
+        # Configure flow threshold control
+        self.flow_spin.setRange(0.0, 1.0)
+        self.flow_spin.setValue(0.6)
+        self.flow_spin.setSingleStep(0.1)
+        self.flow_spin.setToolTip("Flow threshold for cell detection (0-1)")
+        form_layout.addRow("Flow Threshold:", self.flow_spin)
+
+        # Configure probability threshold control
+        self.prob_spin.setRange(0.0, 1.0)
+        self.prob_spin.setValue(0.3)
+        self.prob_spin.setSingleStep(0.1)
+        self.prob_spin.setToolTip("Probability threshold for cell detection (0-1)")
+        form_layout.addRow("Cell Probability:", self.prob_spin)
+
+        # Configure minimum size control
+        self.size_spin.setRange(1, 10000)
+        self.size_spin.setValue(25)
+        self.size_spin.setToolTip("Minimum size of detected cells in pixels")
+        form_layout.addRow("Min Size:", self.size_spin)
+
+        group_widget = QWidget()
+        group_widget.setLayout(form_layout)
+
+        group_layout = QVBoxLayout()
+        group_layout.addWidget(group_widget)
+        group.setLayout(group_layout)
+
+        return group
+
+    def _create_options_group(self) -> QGroupBox:
+        """Create advanced options group"""
+        group = QGroupBox("Advanced Options")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+
+        # Configure checkboxes
+        self.gpu_check.setChecked(True)
+        self.normalize_check.setChecked(True)
+        self.compute_diameter_check.setChecked(True)
+
+        # Add tooltips
+        self.gpu_check.setToolTip("Use GPU acceleration if available")
+        self.normalize_check.setToolTip("Normalize image data before processing")
+        self.compute_diameter_check.setToolTip("Automatically compute cell diameter")
+
+        layout.addWidget(self.gpu_check)
+        layout.addWidget(self.normalize_check)
+        layout.addWidget(self.compute_diameter_check)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_action_group(self) -> QGroupBox:
+        """Create action buttons group"""
+        group = QGroupBox("Actions")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.run_btn)
+        button_layout.addWidget(self.run_stack_btn)
+        layout.addLayout(button_layout)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_cellpose_group(self) -> QGroupBox:
+        """Create Cellpose integration group"""
+        group = QGroupBox("Cellpose Integration")
+        layout = QVBoxLayout()
+        layout.setSpacing(4)
+
+        info_label = QLabel(
+            "Export segmentation data for model training in Cellpose, "
+            "then import the processed results back."
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.export_btn)
+        button_layout.addWidget(self.import_btn)
+        button_layout.addWidget(self.reset_params_btn)
+        layout.addLayout(button_layout)
+
+        group.setLayout(layout)
+        return group
+
+    def _get_current_parameters(self) -> SegmentationParameters:
+        """Get current parameter values from UI"""
+        return SegmentationParameters(
+            model_type=self.model_combo.currentText(),
+            custom_model_path=self._custom_model_path,
+            diameter=self.diameter_spin.value(),
+            flow_threshold=self.flow_spin.value(),
+            cellprob_threshold=self.prob_spin.value(),
+            min_size=self.size_spin.value(),
+            gpu=self.gpu_check.isChecked(),
+            normalize=self.normalize_check.isChecked(),
+            compute_diameter=self.compute_diameter_check.isChecked()
+        )
+
+    def reset_parameters(self):
+        """Reset all parameters to defaults"""
+        self.diameter_spin.setValue(95.0)
+        self.flow_spin.setValue(0.6)
+        self.prob_spin.setValue(0.0)
+        self.size_spin.setValue(25)
+        self.gpu_check.setChecked(True)
+        self.normalize_check.setChecked(True)
+        self.compute_diameter_check.setChecked(False)
+        self.show_scale_disk_check.setChecked(False)
+        self.parameters_updated.emit()
+
+    def _initialize_model(self):
+        """Initialize the segmentation model with current parameters"""
+        try:
+            params = self._get_current_parameters()
+            params.validate()
+            self.segmentation.initialize_model(params)
+        except Exception as e:
+            raise ProcessingError(
+                "Failed to initialize model",
+                str(e),
+                self.__class__.__name__
+            )
+
+    def _ensure_model_initialized(self) -> bool:
+        """Ensure model is initialized"""
+        if self.segmentation.model is None:
+            try:
+                self._initialize_model()
+                return True
+            except Exception as e:
+                self._handle_error(ProcessingError(
+                    "Model initialization failed",
+                    str(e),
+                    self.__class__.__name__
+                ))
+                return False
+        return True
+
     def _run_segmentation(self):
         """Run segmentation on current frame"""
         if getattr(self, '_processing', False):
@@ -513,143 +783,6 @@ class SegmentationWidget(BaseAnalysisWidget):
         self._processing = False
         self._set_controls_enabled(True)
 
-    def _setup_ui(self):
-        """Initialize the user interface"""
-        # Create right side container
-        right_container = QWidget()
-        right_container.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred)
-        right_container.setFixedWidth(350)
-
-        right_layout = QVBoxLayout()
-        right_layout.setSpacing(8)
-        right_layout.setContentsMargins(6, 6, 6, 6)
-
-        # Model Selection Section
-        model_group = QGroupBox("Model Selection")
-        model_layout = QHBoxLayout()
-        model_layout.addWidget(QLabel("Model:"))
-        model_layout.addWidget(self.model_combo)
-        model_layout.addWidget(self.custom_model_btn)
-        model_group.setLayout(model_layout)
-        right_layout.addWidget(model_group)
-
-        # Parameters Section
-        params_group = QGroupBox("Parameters")
-        params_layout = QVBoxLayout()
-        form_layout = QFormLayout()
-        form_layout.addRow("Cell Diameter:", self.diameter_spin)
-        form_layout.addRow("Flow Threshold:", self.flow_spin)
-        form_layout.addRow("Cell Probability:", self.prob_spin)
-        form_layout.addRow("Min Size:", self.size_spin)
-        params_layout.addLayout(form_layout)
-
-        # Add scale disk checkbox and estimate diameter button
-        params_layout.addWidget(self.show_scale_disk_check)
-        params_layout.addWidget(self.reset_params_btn)
-
-        params_group.setLayout(params_layout)
-        right_layout.addWidget(params_group)
-
-        # Options Section
-        options_group = QGroupBox("Advanced Options")
-        options_layout = QVBoxLayout()
-        options_layout.addWidget(self.gpu_check)
-        options_layout.addWidget(self.normalize_check)
-        options_layout.addWidget(self.compute_diameter_check)
-        options_group.setLayout(options_layout)
-        right_layout.addWidget(options_group)
-
-        # Action Buttons
-        action_group = QGroupBox("Actions")
-        action_layout = QVBoxLayout()
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.run_btn)
-        button_layout.addWidget(self.run_stack_btn)
-        action_layout.addLayout(button_layout)
-        action_group.setLayout(action_layout)
-        right_layout.addWidget(action_group)
-
-        # Initialize and add correction widget
-        self.correction_widget = CellCorrectionWidget(
-            self.viewer,
-            self.data_manager,
-            self.visualization_manager
-        )
-        correction_group = QGroupBox("Manual Correction Tools")
-        correction_layout = QVBoxLayout()
-        correction_layout.addWidget(self.correction_widget)
-        correction_group.setLayout(correction_layout)
-        right_layout.addWidget(correction_group)
-
-        # Cellpose Integration
-        cellpose_group = QGroupBox("Cellpose Integration")
-        cellpose_layout = QVBoxLayout()
-        info_label = QLabel(
-            "Export segmentation data for model training in Cellpose, "
-            "then import the processed results back."
-        )
-        info_label.setWordWrap(True)
-        cellpose_layout.addWidget(info_label)
-        cellpose_buttons = QHBoxLayout()
-        cellpose_buttons.addWidget(self.export_btn)
-        cellpose_buttons.addWidget(self.import_btn)
-        cellpose_layout.addLayout(cellpose_buttons)
-        cellpose_group.setLayout(cellpose_layout)
-        right_layout.addWidget(cellpose_group)
-
-        # Add status section
-        status_layout = QVBoxLayout()
-        self.progress_bar = QProgressBar()
-        self.status_label = QLabel("")
-        self.status_label.setWordWrap(True)
-        status_layout.addWidget(self.progress_bar)
-        status_layout.addWidget(self.status_label)
-        right_layout.addLayout(status_layout)
-
-        right_layout.addStretch()
-        right_container.setLayout(right_layout)
-
-        # Add to main layout
-        self.main_layout.addWidget(right_container)
-        self.main_layout.addStretch(1)
-
-        # Register controls
-        self._register_controls()
-
-    def _create_cellpose_group(self) -> QGroupBox:
-        """Create Cellpose integration group"""
-        group = QGroupBox("Cellpose Integration")
-        layout = QVBoxLayout()
-        layout.setSpacing(4)
-
-        info_label = QLabel(
-            "Export segmentation data for model training in Cellpose, "
-            "then import the processed results back."
-        )
-        info_label.setWordWrap(True)
-        layout.addWidget(info_label)
-
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.export_btn)
-        button_layout.addWidget(self.import_btn)
-        button_layout.addWidget(self.reset_params_btn)
-        layout.addLayout(button_layout)
-
-        group.setLayout(layout)
-        return group
-
-    def reset_parameters(self):
-        """Reset all parameters to defaults"""
-        self.diameter_spin.setValue(95.0)
-        self.flow_spin.setValue(0.6)
-        self.prob_spin.setValue(0.0)
-        self.size_spin.setValue(25)
-        self.gpu_check.setChecked(True)
-        self.normalize_check.setChecked(True)
-        self.compute_diameter_check.setChecked(False)
-        self.show_scale_disk_check.setChecked(False)
-        self.parameters_updated.emit()
-
     def import_from_cellpose(self):
         """Import processed masks and images from Cellpose"""
         if getattr(self, '_processing', False):
@@ -777,114 +910,6 @@ class SegmentationWidget(BaseAnalysisWidget):
             # Ensure UI state is properly updated regardless of success/failure
             self._update_ui_state()
 
-    def _on_model_changed(self, model_type: str):
-        """Handle model type change"""
-        self.custom_model_btn.setEnabled(model_type == "custom")
-        if model_type != "custom":
-            self._custom_model_path = None
-            try:
-                self._initialize_model()
-            except Exception as e:
-                self._handle_error(ProcessingError(
-                    "Failed to initialize model",
-                    str(e),
-                    self.__class__.__name__
-                ))
-
-    def _get_current_parameters(self) -> SegmentationParameters:
-        """Get current parameter values from UI"""
-        return SegmentationParameters(
-            model_type=self.model_combo.currentText(),
-            custom_model_path=self._custom_model_path,
-            diameter=self.diameter_spin.value(),
-            flow_threshold=self.flow_spin.value(),
-            cellprob_threshold=self.prob_spin.value(),
-            min_size=self.size_spin.value(),
-            gpu=self.gpu_check.isChecked(),
-            normalize=self.normalize_check.isChecked(),
-            compute_diameter=self.compute_diameter_check.isChecked()
-        )
-
-    def _ensure_model_initialized(self) -> bool:
-        """Ensure model is initialized"""
-        if self.segmentation.model is None:
-            try:
-                self._initialize_model()
-                return True
-            except Exception as e:
-                self._handle_error(ProcessingError(
-                    "Model initialization failed",
-                    str(e),
-                    self.__class__.__name__
-                ))
-                return False
-        return True
-
-    def _initialize_model(self):
-        """Initialize the segmentation model with current parameters"""
-        try:
-            params = self._get_current_parameters()
-            params.validate()
-            self.segmentation.initialize_model(params)
-        except Exception as e:
-            raise ProcessingError(
-                "Failed to initialize model",
-                str(e),
-                self.__class__.__name__
-            )
-
-    def _update_ui_state(self):
-        """Update UI based on current state"""
-        # Get current state
-        has_image = bool(self._get_active_image_layer() is not None)  # Ensure boolean
-        model_initialized = bool(self.segmentation.model is not None)  # Ensure boolean
-        has_segmentation_data = bool(  # Ensure boolean
-            self.data_manager.segmentation_data is not None and
-            np.any(self.data_manager.segmentation_data)
-        )
-
-        # Update basic controls
-        for control in self._controls:
-            if control not in [self.run_btn, self.run_stack_btn, self.export_btn, self.import_btn]:
-                control.setEnabled(True)
-
-        # Update model-specific controls
-        self.custom_model_btn.setEnabled(bool(self.model_combo.currentText() == "custom"))
-
-        # Update action buttons based on state
-        self.run_btn.setEnabled(bool(has_image and model_initialized))
-        self.run_stack_btn.setEnabled(bool(has_image and model_initialized))
-
-        # Export button enabled only when we have both image and segmentation data
-        self.export_btn.setEnabled(bool(has_image and has_segmentation_data))
-
-        # Import button is always enabled as it's an entry point for data
-        self.import_btn.setEnabled(True)
-
-    def _load_custom_model(self):
-        """Open file dialog to select custom model"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Custom Model",
-            str(Path.home()),
-            "All Files (*.*);; Model Files (*.pth)"
-        )
-
-        if file_path:
-            try:
-                from cellpose.models import CellposeModel
-                # Verify model is valid
-                test_model = CellposeModel(pretrained_model=file_path)
-                self._custom_model_path = file_path
-                self._initialize_model()
-            except Exception as e:
-                self._handle_error(ProcessingError(
-                    "Failed to load custom model",
-                    str(e),
-                    self.__class__.__name__
-                ))
-                self._custom_model_path = None
-
     def export_to_cellpose(self):
         """Export current segmentation for Cellpose GUI editing"""
         if getattr(self, '_processing', False):
@@ -983,96 +1008,144 @@ class SegmentationWidget(BaseAnalysisWidget):
             self._processing = False
             self._set_controls_enabled(True)
 
-    def _create_model_group(self) -> QGroupBox:
-        """Create model selection controls group"""
-        group = QGroupBox("Model Selection")
-        layout = QHBoxLayout()
-        layout.setSpacing(4)
+    def _prepare_frame_image(self, image: np.ndarray) -> np.ndarray:
+        """Prepare image frame for export"""
+        if image.ndim > 2:
+            image = image.squeeze()
+        return self._scale_to_8bit(image) if image.dtype != np.uint8 else image
 
-        layout.addWidget(QLabel("Model:"))
-        layout.addWidget(self.model_combo)
-        layout.addWidget(self.custom_model_btn)
+    def _prepare_frame_masks(self, frame_idx: int) -> np.ndarray:
+        """Prepare masks frame for export"""
+        masks = self.data_manager.segmentation_data[frame_idx]
+        if masks.ndim > 2:
+            masks = masks.squeeze()
+        return masks.astype(np.uint16)
 
-        group.setLayout(layout)
-        return group
+    def _create_cellpose_data(self, image: np.ndarray, masks: np.ndarray, filename: str) -> dict:
+        """Create Cellpose-format data dictionary"""
+        from cellpose.utils import masks_to_outlines
+        outlines = masks_to_outlines(masks)
+        ncells = len(np.unique(masks)[1:])
+        colors = ((np.random.rand(ncells, 3) * 0.8 + 0.1) * 255).astype(np.uint8)
 
-    def _create_parameter_group(self) -> QGroupBox:
-        """Create segmentation parameters group"""
-        group = QGroupBox("Parameters")
-        form_layout = QFormLayout()
-        form_layout.setSpacing(4)
+        return {
+            'img': image,
+            'masks': masks,
+            'outlines': outlines,
+            'colors': colors,
+            'filename': filename,
+            'flows': self.segmentation.last_results.get('flows', [None, None]),
+            'chan_choose': [0, 0],
+            'ismanual': np.zeros(ncells, dtype=bool),
+            'diameter': float(self.segmentation.params.diameter)
+        }
 
-        # Configure diameter control
-        self.diameter_spin.setRange(0.1, 1000.0)
-        self.diameter_spin.setValue(95.0)
-        self.diameter_spin.setToolTip("Expected diameter of cells in pixels")
-        form_layout.addRow("Cell Diameter:", self.diameter_spin)
+    def _scale_to_8bit(self, image: np.ndarray) -> np.ndarray:
+        """Scale image data to 8-bit range"""
+        img_min = np.percentile(image, 1)
+        img_max = np.percentile(image, 99)
+        scaled = np.clip(image, img_min, img_max)
+        scaled = ((scaled - img_min) / (img_max - img_min) * 255).astype(np.uint8)
+        return scaled
 
-        # Configure flow threshold control
-        self.flow_spin.setRange(0.0, 1.0)
-        self.flow_spin.setValue(0.6)
-        self.flow_spin.setSingleStep(0.1)
-        self.flow_spin.setToolTip("Flow threshold for cell detection (0-1)")
-        form_layout.addRow("Flow Threshold:", self.flow_spin)
+    def _on_model_changed(self, model_type: str):
+        """Handle model type change"""
+        self.custom_model_btn.setEnabled(model_type == "custom")
+        if model_type != "custom":
+            self._custom_model_path = None
+            try:
+                self._initialize_model()
+            except Exception as e:
+                self._handle_error(ProcessingError(
+                    "Failed to initialize model",
+                    str(e),
+                    self.__class__.__name__
+                ))
 
-        # Configure probability threshold control
-        self.prob_spin.setRange(0.0, 1.0)
-        self.prob_spin.setValue(0.3)
-        self.prob_spin.setSingleStep(0.1)
-        self.prob_spin.setToolTip("Probability threshold for cell detection (0-1)")
-        form_layout.addRow("Cell Probability:", self.prob_spin)
+    def _update_ui_state(self):
+        """Update UI based on current state"""
+        # Get current state
+        has_image = bool(self._get_active_image_layer() is not None)  # Ensure boolean
+        model_initialized = bool(self.segmentation.model is not None)  # Ensure boolean
+        has_segmentation_data = bool(  # Ensure boolean
+            self.data_manager.segmentation_data is not None and
+            np.any(self.data_manager.segmentation_data)
+        )
 
-        # Configure minimum size control
-        self.size_spin.setRange(1, 10000)
-        self.size_spin.setValue(25)
-        self.size_spin.setToolTip("Minimum size of detected cells in pixels")
-        form_layout.addRow("Min Size:", self.size_spin)
+        # Update basic controls
+        for control in self._controls:
+            if control not in [self.run_btn, self.run_stack_btn, self.export_btn, self.import_btn]:
+                control.setEnabled(True)
 
-        group_widget = QWidget()
-        group_widget.setLayout(form_layout)
+        # Update model-specific controls
+        self.custom_model_btn.setEnabled(bool(self.model_combo.currentText() == "custom"))
 
-        group_layout = QVBoxLayout()
-        group_layout.addWidget(group_widget)
-        group.setLayout(group_layout)
+        # Update action buttons based on state
+        self.run_btn.setEnabled(bool(has_image and model_initialized))
+        self.run_stack_btn.setEnabled(bool(has_image and model_initialized))
 
-        return group
+        # Export button enabled only when we have both image and segmentation data
+        self.export_btn.setEnabled(bool(has_image and has_segmentation_data))
 
-    def _create_options_group(self) -> QGroupBox:
-        """Create advanced options group"""
-        group = QGroupBox("Advanced Options")
-        layout = QVBoxLayout()
-        layout.setSpacing(4)
+        # Import button is always enabled as it's an entry point for data
+        self.import_btn.setEnabled(True)
 
-        # Configure checkboxes
-        self.gpu_check.setChecked(True)
-        self.normalize_check.setChecked(True)
-        self.compute_diameter_check.setChecked(True)
+    def _load_custom_model(self):
+        """Open file dialog to select custom model"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Custom Model",
+            str(Path.home()),
+            "All Files (*.*);; Model Files (*.pth)"
+        )
 
-        # Add tooltips
-        self.gpu_check.setToolTip("Use GPU acceleration if available")
-        self.normalize_check.setToolTip("Normalize image data before processing")
-        self.compute_diameter_check.setToolTip("Automatically compute cell diameter")
+        if file_path:
+            try:
+                from cellpose.models import CellposeModel
+                # Verify model is valid
+                test_model = CellposeModel(pretrained_model=file_path)
+                self._custom_model_path = file_path
+                self._initialize_model()
+            except Exception as e:
+                self._handle_error(ProcessingError(
+                    "Failed to load custom model",
+                    str(e),
+                    self.__class__.__name__
+                ))
+                self._custom_model_path = None
 
-        layout.addWidget(self.gpu_check)
-        layout.addWidget(self.normalize_check)
-        layout.addWidget(self.compute_diameter_check)
+    def _update_scale_disk(self, *args):
+        """Update or create a label layer showing the current diameter as a circle."""
+        # Remove existing Scale Disk layer (with correct name)
+        while 'Scale Disk' in [layer.name for layer in self.viewer.layers]:
+            self.viewer.layers.remove('Scale Disk')
 
-        group.setLayout(layout)
-        return group
+        # Only create new layer if checkbox is checked
+        if not self.show_scale_disk_check.isChecked():
+            return
 
-    def _create_action_group(self) -> QGroupBox:
-        """Create action buttons group"""
-        group = QGroupBox("Actions")
-        layout = QVBoxLayout()
-        layout.setSpacing(4)
+        try:
+            # Create disk data
+            diameter = int(self.diameter_spin.value())
+            size = diameter + 4
+            data = np.zeros((size, size), dtype=np.uint16)
 
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.run_btn)
-        button_layout.addWidget(self.run_stack_btn)
-        layout.addLayout(button_layout)
+            rr, cc = np.ogrid[:size, :size]
+            center = size // 2
+            radius = diameter // 2
+            circle_mask = (rr - center) ** 2 + (cc - center) ** 2 <= radius ** 2
+            data[circle_mask] = 1
 
-        group.setLayout(layout)
-        return group
+            # Create new layer with explicit name
+            labels_layer = self.viewer.add_labels(data, opacity=0.8)
+            labels_layer.name = 'Scale Disk'  # Explicitly set the name
+
+        except Exception as e:
+            self._handle_error(ProcessingError(
+                "Failed to update scale disk",
+                str(e),
+                self.__class__.__name__
+            ))
 
     def _handle_layer_removal(self, event):
         """Handle layer removal events"""
@@ -1148,78 +1221,6 @@ class SegmentationWidget(BaseAnalysisWidget):
         finally:
             progress.close()
 
-    def _prepare_frame_image(self, image: np.ndarray) -> np.ndarray:
-        """Prepare image frame for export"""
-        if image.ndim > 2:
-            image = image.squeeze()
-        return self._scale_to_8bit(image) if image.dtype != np.uint8 else image
-
-    def _prepare_frame_masks(self, frame_idx: int) -> np.ndarray:
-        """Prepare masks frame for export"""
-        masks = self.data_manager.segmentation_data[frame_idx]
-        if masks.ndim > 2:
-            masks = masks.squeeze()
-        return masks.astype(np.uint16)
-
-    def _create_cellpose_data(self, image: np.ndarray, masks: np.ndarray, filename: str) -> dict:
-        """Create Cellpose-format data dictionary"""
-        from cellpose.utils import masks_to_outlines
-        outlines = masks_to_outlines(masks)
-        ncells = len(np.unique(masks)[1:])
-        colors = ((np.random.rand(ncells, 3) * 0.8 + 0.1) * 255).astype(np.uint8)
-
-        return {
-            'img': image,
-            'masks': masks,
-            'outlines': outlines,
-            'colors': colors,
-            'filename': filename,
-            'flows': self.segmentation.last_results.get('flows', [None, None]),
-            'chan_choose': [0, 0],
-            'ismanual': np.zeros(ncells, dtype=bool),
-            'diameter': float(self.segmentation.params.diameter)
-        }
-
-    def _scale_to_8bit(self, image: np.ndarray) -> np.ndarray:
-        """Scale image data to 8-bit range"""
-        img_min = np.percentile(image, 1)
-        img_max = np.percentile(image, 99)
-        scaled = np.clip(image, img_min, img_max)
-        scaled = ((scaled - img_min) / (img_max - img_min) * 255).astype(np.uint8)
-        return scaled
-
-    def _update_scale_disk(self, *args):
-        """Update or create a label layer showing the current diameter as a circle."""
-        # Remove existing Scale Disk layer (with correct name)
-        while 'Scale Disk' in [layer.name for layer in self.viewer.layers]:
-            self.viewer.layers.remove('Scale Disk')
-
-        # Only create new layer if checkbox is checked
-        if not self.show_scale_disk_check.isChecked():
-            return
-
-        try:
-            # Create disk data
-            diameter = int(self.diameter_spin.value())
-            size = diameter + 4
-            data = np.zeros((size, size), dtype=np.uint16)
-
-            rr, cc = np.ogrid[:size, :size]
-            center = size // 2
-            radius = diameter // 2
-            circle_mask = (rr - center) ** 2 + (cc - center) ** 2 <= radius ** 2
-            data[circle_mask] = 1
-
-            # Create new layer with explicit name
-            labels_layer = self.viewer.add_labels(data, opacity=0.8)
-            labels_layer.name = 'Scale Disk'  # Explicitly set the name
-
-        except Exception as e:
-            self._handle_error(ProcessingError(
-                "Failed to update scale disk",
-                str(e),
-                self.__class__.__name__
-            ))
     def cleanup(self):
         """Clean up resources"""
         # Remove scale disk layer if it exists
@@ -1234,4 +1235,3 @@ class SegmentationWidget(BaseAnalysisWidget):
         if hasattr(self, 'correction_widget'):
             self.correction_widget.cleanup()
         super().cleanup()
-
