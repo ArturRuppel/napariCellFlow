@@ -525,6 +525,9 @@ class EdgeAnalyzer:
         results.update_metadata('total_frames', len(tracked_data))
         results.update_metadata('frame_ids', list(range(len(tracked_data))))
 
+        # Store the segmentation data
+        results.set_segmentation_data(tracked_data)
+
         # Process each frame
         boundaries_by_frame = {}
         all_intercalations = []

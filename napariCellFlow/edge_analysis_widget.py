@@ -112,91 +112,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self.analyze_btn.setEnabled(has_valid_input)
         self.save_btn.setEnabled(self._current_results is not None)
 
-    def load_results(self):
-        """Load previously saved analysis results"""
-        try:
-            file_path = self._get_load_path()
-            if file_path is None:
-                # User cancelled the file dialog
-                self._update_ui_state()  # Ensure buttons are in correct state
-                return
-
-            if not file_path.exists():
-                raise ProcessingError(
-                    message="File not found",
-                    details=str(file_path),
-                    component=self.__class__.__name__
-                )
-
-            self._set_controls_enabled(False)
-            self._update_status("Loading analysis results...", 20)
-
-            # Clear previous visualizations
-            self.vis_manager.clear_edge_layers()
-
-            # Load and validate data
-            self.data_manager.load_analysis_results(file_path)
-            loaded_data = self.data_manager.analysis_results
-
-            if loaded_data is None:
-                raise ProcessingError(
-                    message="No valid analysis results found in file",
-                    component=self.__class__.__name__
-                )
-
-            # Validate essential attributes
-            if not hasattr(loaded_data, 'edges') or not loaded_data.edges:
-                raise ProcessingError(
-                    message="Invalid analysis results: missing edge data",
-                    component=self.__class__.__name__
-                )
-
-            # Store current results
-            self._current_results = loaded_data
-
-            # Extract and validate boundaries
-            boundaries_by_frame = self._extract_boundaries(loaded_data)
-            if not boundaries_by_frame:
-                raise ProcessingError(
-                    message="No valid boundary data found in results",
-                    component=self.__class__.__name__
-                )
-            self._current_boundaries = boundaries_by_frame
-
-            # Update visualizations
-            self._update_status("Updating visualizations...", 60)
-            self.vis_manager.update_edge_visualization(boundaries_by_frame)
-            self.vis_manager.update_intercalation_visualization(loaded_data)
-            self.vis_manager.update_edge_analysis_visualization(loaded_data)
-
-            # Emit signals for other components
-            self.edges_detected.emit(boundaries_by_frame)
-            self.analysis_completed.emit(loaded_data)
-
-            self._update_status(
-                f"Loaded analysis results from {file_path.name} "
-                f"({len(loaded_data.edges)} edges)",
-                100
-            )
-
-        except Exception as e:
-            if isinstance(e, ProcessingError):
-                self._handle_error(e)  # Pass through existing ProcessingErrors
-            else:
-                # Use base widget's error handling
-                self._handle_error(ProcessingError(
-                    message="Failed to load results",
-                    details=str(e),
-                    component=self.__class__.__name__
-                ))
-
-            # Clear any partial results
-            self._current_results = None
-            self._current_boundaries = None
-
-        finally:
-            self._set_controls_enabled(True)
-            self._update_ui_state()  # Ensure buttons are in correct state
 
     def _connect_signals(self):
         # Existing signal connections
@@ -213,7 +128,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         self.load_btn.clicked.connect(self.load_results)
         self.reset_btn.clicked.connect(self.reset_parameters)
 
-
     def run_analysis(self):
         selected = self._get_active_labels_layer()
         if selected is None:
@@ -228,9 +142,12 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
             self.vis_manager.clear_edge_layers()
 
+            # Store the segmentation data
+            self.segmentation_data = selected.data
+
             # Create worker and thread
             self._analysis_thread = QThread()
-            self._analysis_worker = AnalysisWorker(self.analyzer, selected.data)
+            self._analysis_worker = AnalysisWorker(self.analyzer, self.segmentation_data)
             self._analysis_worker.moveToThread(self._analysis_thread)
 
             # Connect signals
@@ -253,14 +170,14 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             ))
             self._set_controls_enabled(True)
 
-    def _handle_progress(self, progress: int, message: str):
-        """Handle progress updates from worker"""
-        self._update_status(message, progress)
-
     def _handle_analysis_complete(self, results):
         """Handle completion of analysis"""
         try:
             self._current_results = results
+
+            # Add segmentation data to results
+            results.set_segmentation_data(self.segmentation_data)
+
             self.data_manager.analysis_results = results
 
             boundaries_by_frame = self._extract_boundaries(results)
@@ -290,6 +207,10 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             self._handle_analysis_error(e)
         finally:
             self._set_controls_enabled(True)
+
+    def _handle_progress(self, progress: int, message: str):
+        """Handle progress updates from worker"""
+        self._update_status(message, progress)
 
     def _handle_analysis_error(self, error):
         """Handle errors from worker"""
@@ -503,7 +424,12 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             if file_path.suffix.lower() != '.pkl':
                 file_path = file_path.with_suffix('.pkl')
 
-            # Save results
+            # Ensure segmentation data is included in results
+            if self.segmentation_data is not None and self._current_results.get_segmentation_data() is None:
+                self._current_results.set_segmentation_data(self.segmentation_data)
+
+            # Update data manager and save
+            self.data_manager.analysis_results = self._current_results
             self.data_manager.save_analysis_results(file_path)
 
             self._update_status(
@@ -522,6 +448,119 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         finally:
             self._set_controls_enabled(True)
 
+    def load_results(self):
+        """Load previously saved analysis results"""
+        try:
+            file_path = self._get_load_path()
+            if file_path is None:
+                # User cancelled the file dialog
+                self._update_ui_state()  # Ensure buttons are in correct state
+                return
+
+            if not file_path.exists():
+                raise ProcessingError(
+                    message="File not found",
+                    details=str(file_path),
+                    component=self.__class__.__name__
+                )
+
+            self._set_controls_enabled(False)
+            self._update_status("Loading analysis results...", 20)
+
+            # Clear previous visualizations
+            self.vis_manager.clear_edge_layers()
+
+            # Load and validate data
+            self.data_manager.load_analysis_results(file_path)
+            loaded_data = self.data_manager.analysis_results
+
+            if loaded_data is None:
+                raise ProcessingError(
+                    message="No valid analysis results found in file",
+                    component=self.__class__.__name__
+                )
+
+            # Validate essential attributes
+            if not hasattr(loaded_data, 'edges') or not loaded_data.edges:
+                raise ProcessingError(
+                    message="Invalid analysis results: missing edge data",
+                    component=self.__class__.__name__
+                )
+
+            # Validate segmentation data
+            if not hasattr(loaded_data, 'get_segmentation_data') or loaded_data.get_segmentation_data() is None:
+                raise ProcessingError(
+                    message="Invalid analysis results: missing segmentation data",
+                    component=self.__class__.__name__
+                )
+
+            # Store current results and segmentation data
+            self._current_results = loaded_data
+            self.segmentation_data = loaded_data.get_segmentation_data()
+
+            # Extract and validate boundaries
+            boundaries_by_frame = self._extract_boundaries(loaded_data)
+            if not boundaries_by_frame:
+                raise ProcessingError(
+                    message="No valid boundary data found in results",
+                    component=self.__class__.__name__
+                )
+            self._current_boundaries = boundaries_by_frame
+
+            # Update visualizations
+            self._update_status("Updating visualizations...", 60)
+            self.vis_manager.update_edge_visualization(boundaries_by_frame)
+            self.vis_manager.update_intercalation_visualization(loaded_data)
+            self.vis_manager.update_edge_analysis_visualization(loaded_data)
+
+            # Optionally, restore the segmentation layer in napari
+            self._restore_segmentation_layer()
+
+            # Emit signals for other components
+            self.edges_detected.emit(boundaries_by_frame)
+            self.analysis_completed.emit(loaded_data)
+
+            self._update_status(
+                f"Loaded analysis results from {file_path.name} "
+                f"({len(loaded_data.edges)} edges)",
+                100
+            )
+
+        except Exception as e:
+            if isinstance(e, ProcessingError):
+                self._handle_error(e)  # Pass through existing ProcessingErrors
+            else:
+                # Use base widget's error handling
+                self._handle_error(ProcessingError(
+                    message="Failed to load results",
+                    details=str(e),
+                    component=self.__class__.__name__
+                ))
+
+            # Clear any partial results
+            self._current_results = None
+            self._current_boundaries = None
+            self.segmentation_data = None
+
+        finally:
+            self._set_controls_enabled(True)
+            self._update_ui_state()  # Ensure buttons are in correct state
+
+    def _restore_segmentation_layer(self):
+        """Restore the segmentation layer in napari viewer"""
+        if self.segmentation_data is not None:
+            # Check if a layer with the same data already exists
+            existing_layers = [layer for layer in self.viewer.layers
+                               if isinstance(layer, napari.layers.Labels)
+                               and np.array_equal(layer.data, self.segmentation_data)]
+
+            if not existing_layers:
+                # Add new layer if it doesn't exist
+                self.viewer.add_labels(
+                    self.segmentation_data,
+                    name='Loaded Segmentation',
+                    opacity=0.5
+                )
     def _extract_boundaries(self, results):
         """Extract cell boundaries from analysis results"""
         boundaries_by_frame = {}
