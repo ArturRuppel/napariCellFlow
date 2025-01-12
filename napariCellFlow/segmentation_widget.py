@@ -134,6 +134,20 @@ class SegmentationWidget(BaseAnalysisWidget):
             "This is crucial for accurate segmentation"
         )
 
+        self.estimate_diameter_btn = QPushButton("Estimate diameter from image")
+        self.estimate_diameter_btn.setToolTip(
+            "Automatically estimate cell diameter from the current image\n"
+            "Uses Cellpose's built-in estimation algorithm\n"
+            "Will update the diameter parameter with the estimated value"
+        )
+
+        self.show_scale_disk_check = QCheckBox("Show scale disk")
+        self.show_scale_disk_check.setToolTip(
+            "Display a reference circle in the top left corner\n"
+            "showing the current cell diameter in pixels\n"
+            "Helps validate if the diameter parameter matches your cells"
+        )
+
         self.flow_spin = QDoubleSpinBox()
         self.flow_spin.setRange(0.0, 1.0)
         self.flow_spin.setValue(0.6)
@@ -192,6 +206,7 @@ class SegmentationWidget(BaseAnalysisWidget):
         self.gpu_check.setChecked(True)
         self.normalize_check.setChecked(True)
         self.compute_diameter_check.setChecked(False)
+        self.show_scale_disk_check.setChecked(False)
 
         # Action buttons
         self.run_btn = QPushButton("Segment Frame")
@@ -225,6 +240,54 @@ class SegmentationWidget(BaseAnalysisWidget):
             "Useful if segmentation results are poor\n"
             "Will not affect existing segmentations"
         )
+
+    def _register_controls(self):
+        """Register all controls with base widget"""
+        for control in [
+            self.model_combo, self.custom_model_btn,
+            self.diameter_spin, self.flow_spin, self.prob_spin, self.size_spin,
+            self.gpu_check, self.normalize_check, self.compute_diameter_check,
+            self.show_scale_disk_check, self.estimate_diameter_btn,  # New controls
+            self.run_btn, self.run_stack_btn,
+            self.export_btn, self.import_btn, self.reset_params_btn
+        ]:
+            self.register_control(control)
+
+    def _connect_signals(self):
+        """Connect all signal handlers"""
+        # Model signals
+        self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        self.custom_model_btn.clicked.connect(self._load_custom_model)
+
+        # Parameter change signals
+        for control in [
+            self.diameter_spin, self.flow_spin, self.prob_spin, self.size_spin,
+            self.gpu_check, self.normalize_check, self.compute_diameter_check,
+            self.show_scale_disk_check  # New control
+        ]:
+            if isinstance(control, (QSpinBox, QDoubleSpinBox)):
+                control.valueChanged.connect(self.parameters_updated.emit)
+            else:
+                control.stateChanged.connect(self.parameters_updated.emit)
+
+        # Connect new controls
+        self.show_scale_disk_check.stateChanged.connect(self._update_scale_disk)
+        self.estimate_diameter_btn.clicked.connect(self._estimate_diameter)
+        self.diameter_spin.valueChanged.connect(self._update_scale_disk)
+
+        # Action signals
+        self.run_btn.clicked.connect(self._run_segmentation)
+        self.run_stack_btn.clicked.connect(self._run_stack_segmentation)
+        self.export_btn.clicked.connect(self.export_to_cellpose)
+        self.import_btn.clicked.connect(self.import_from_cellpose)
+        self.reset_params_btn.clicked.connect(self.reset_parameters)
+
+        # Layer change handlers
+        if self.viewer is not None:
+            self.viewer.layers.events.inserted.connect(self._update_ui_state)
+            self.viewer.layers.events.removed.connect(self._update_ui_state)
+            self.viewer.layers.selection.events.changed.connect(self._update_ui_state)
+
     def _run_segmentation(self):
         """Run segmentation on current frame"""
         if getattr(self, '_processing', False):
@@ -458,17 +521,6 @@ class SegmentationWidget(BaseAnalysisWidget):
         self._processing = False
         self._set_controls_enabled(True)
 
-    def cleanup(self):
-        """Clean up resources"""
-        # Clean up segmentation thread
-        if hasattr(self, '_segmentation_thread') and self._segmentation_thread and self._segmentation_thread.isRunning():
-            self._segmentation_thread.quit()
-            self._segmentation_thread.wait()
-
-        if hasattr(self, 'correction_widget'):
-            self.correction_widget.cleanup()
-        super().cleanup()
-
     def _setup_ui(self):
         """Initialize the user interface"""
         # Create right side container
@@ -498,7 +550,12 @@ class SegmentationWidget(BaseAnalysisWidget):
         form_layout.addRow("Cell Probability:", self.prob_spin)
         form_layout.addRow("Min Size:", self.size_spin)
         params_layout.addLayout(form_layout)
+
+        # Add scale disk checkbox and estimate diameter button
+        params_layout.addWidget(self.show_scale_disk_check)
+        params_layout.addWidget(self.estimate_diameter_btn)
         params_layout.addWidget(self.reset_params_btn)
+
         params_group.setLayout(params_layout)
         right_layout.addWidget(params_group)
 
@@ -568,17 +625,6 @@ class SegmentationWidget(BaseAnalysisWidget):
         # Register controls
         self._register_controls()
 
-    def _register_controls(self):
-        """Register all controls with base widget"""
-        for control in [
-            self.model_combo, self.custom_model_btn,
-            self.diameter_spin, self.flow_spin, self.prob_spin, self.size_spin,
-            self.gpu_check, self.normalize_check, self.compute_diameter_check,
-            self.run_btn, self.run_stack_btn,
-            self.export_btn, self.import_btn, self.reset_params_btn
-        ]:
-            self.register_control(control)
-
     def _create_cellpose_group(self) -> QGroupBox:
         """Create Cellpose integration group"""
         group = QGroupBox("Cellpose Integration")
@@ -601,35 +647,6 @@ class SegmentationWidget(BaseAnalysisWidget):
         group.setLayout(layout)
         return group
 
-    def _connect_signals(self):
-        """Connect all signal handlers"""
-        # Model signals
-        self.model_combo.currentTextChanged.connect(self._on_model_changed)
-        self.custom_model_btn.clicked.connect(self._load_custom_model)
-
-        # Parameter change signals
-        for control in [
-            self.diameter_spin, self.flow_spin, self.prob_spin, self.size_spin,
-            self.gpu_check, self.normalize_check, self.compute_diameter_check
-        ]:
-            if isinstance(control, (QSpinBox, QDoubleSpinBox)):
-                control.valueChanged.connect(self.parameters_updated.emit)
-            else:
-                control.stateChanged.connect(self.parameters_updated.emit)
-
-        # Action signals
-        self.run_btn.clicked.connect(self._run_segmentation)
-        self.run_stack_btn.clicked.connect(self._run_stack_segmentation)
-        self.export_btn.clicked.connect(self.export_to_cellpose)
-        self.import_btn.clicked.connect(self.import_from_cellpose)
-        self.reset_params_btn.clicked.connect(self.reset_parameters)
-
-        # Layer change handlers
-        if self.viewer is not None:
-            self.viewer.layers.events.inserted.connect(self._update_ui_state)
-            self.viewer.layers.events.removed.connect(self._update_ui_state)
-            self.viewer.layers.selection.events.changed.connect(self._update_ui_state)
-
     def reset_parameters(self):
         """Reset all parameters to defaults"""
         self.diameter_spin.setValue(95.0)
@@ -639,6 +656,7 @@ class SegmentationWidget(BaseAnalysisWidget):
         self.gpu_check.setChecked(True)
         self.normalize_check.setChecked(True)
         self.compute_diameter_check.setChecked(False)
+        self.show_scale_disk_check.setChecked(False)
         self.parameters_updated.emit()
 
     def import_from_cellpose(self):
@@ -1178,3 +1196,55 @@ class SegmentationWidget(BaseAnalysisWidget):
         scaled = np.clip(image, img_min, img_max)
         scaled = ((scaled - img_min) / (img_max - img_min) * 255).astype(np.uint8)
         return scaled
+
+    def _update_scale_disk(self, *args):
+        """Update or create a label layer showing the current diameter as a circle."""
+        # Remove existing Scale Disk layer (with correct name)
+        while 'Scale Disk' in [layer.name for layer in self.viewer.layers]:
+            self.viewer.layers.remove('Scale Disk')
+
+        # Only create new layer if checkbox is checked
+        if not self.show_scale_disk_check.isChecked():
+            return
+
+        try:
+            # Create disk data
+            diameter = int(self.diameter_spin.value())
+            size = diameter + 4
+            data = np.zeros((size, size), dtype=np.uint16)
+
+            rr, cc = np.ogrid[:size, :size]
+            center = size // 2
+            radius = diameter // 2
+            circle_mask = (rr - center) ** 2 + (cc - center) ** 2 <= radius ** 2
+            data[circle_mask] = 1
+
+            # Create new layer with explicit name
+            labels_layer = self.viewer.add_labels(data, opacity=0.8)
+            labels_layer.name = 'Scale Disk'  # Explicitly set the name
+
+        except Exception as e:
+            self._handle_error(ProcessingError(
+                "Failed to update scale disk",
+                str(e),
+                self.__class__.__name__
+            ))
+    def cleanup(self):
+        """Clean up resources"""
+        # Remove scale disk layer if it exists
+        if 'Scale Disk' in self.viewer.layers:
+            self.viewer.layers.remove('Scale Disk')
+
+        # Clean up segmentation thread
+        if hasattr(self, '_segmentation_thread') and self._segmentation_thread and self._segmentation_thread.isRunning():
+            self._segmentation_thread.quit()
+            self._segmentation_thread.wait()
+
+        if hasattr(self, 'correction_widget'):
+            self.correction_widget.cleanup()
+        super().cleanup()
+
+    def _estimate_diameter(self):
+        """Mock method: Estimate diameter from current image"""
+        # This will be implemented later
+        pass
