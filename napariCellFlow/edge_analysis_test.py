@@ -37,6 +37,7 @@ from unittest.mock import Mock, patch, MagicMock
 import napari
 import numpy as np
 import pytest
+from psygnal import Signal
 from qtpy.QtWidgets import (
     QFileDialog
 )
@@ -111,7 +112,7 @@ def create_test_sequence():
         [0, 0, 0, 0, 3, 3, 1, 1, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 3, 3, 3, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 3, 3, 3, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        [0, 0, 0, 0, 3, 3, 2, 2, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 3, 3, 3, 4, 4, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 3, 2, 2, 2, 2, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 2, 2, 2, 2, 2, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -229,16 +230,97 @@ class TestEdgeAnalyzer:
 
     def test_intercalation_detection(self, analyzer):
         """Test T1 transition detection"""
+        print("\n=== Starting intercalation detection test ===")
+
+        # Debug sequence creation
         sequence = create_test_sequence()
+
+        print(f"\nTest sequence shape: {sequence.shape}")
+        print("Unique cell IDs in each frame:")
+        for i, frame in enumerate(sequence):
+            print(f"Frame {i}: {np.unique(frame[frame > 0])}")
+
+        # Add debug prints to key methods in EdgeAnalyzer
+        original_detect_edges = analyzer._detect_edges
+
+        def debug_detect_edges(frame_data):
+            print(f"\nDetecting edges in frame shape: {frame_data.shape}")
+            boundaries = original_detect_edges(frame_data)
+            print(f"Found {len(boundaries)} boundaries")
+            for b in boundaries:
+                print(f"Boundary between cells {b.cell_ids} with length {b.length:.2f}")
+            return boundaries
+
+        analyzer._detect_edges = debug_detect_edges
+
+        original_detect_topology = analyzer._detect_topology_changes
+
+        def debug_topology_changes(frame, next_frame):
+            print(f"\nAnalyzing topology changes between frames {frame} and {next_frame}")
+            G1 = analyzer._frame_graphs[frame]
+            G2 = analyzer._frame_graphs[next_frame]
+            print(f"Frame {frame} edges: {list(G1.edges())}")
+            print(f"Frame {next_frame} edges: {list(G2.edges())}")
+            events = original_detect_topology(frame, next_frame)
+            print(f"Detected {len(events)} topology changes")
+            for event in events:
+                print(f"Event: {event.losing_cells} → {event.gaining_cells}")
+            return events
+
+        analyzer._detect_topology_changes = debug_topology_changes
+
+        original_validate_t1 = analyzer._validate_t1_transition
+
+        def debug_validate_t1(lost_edge, gained_edge, G1, G2):
+            print(f"\nValidating T1 transition:")
+            print(f"Lost edge: {lost_edge}")
+            print(f"Gained edge: {gained_edge}")
+            valid = original_validate_t1(lost_edge, gained_edge, G1, G2)
+            print(f"Valid T1? {valid}")
+            if not valid:
+                all_cells = lost_edge | gained_edge
+                print(f"All cells involved: {all_cells}")
+                print(f"Number of unique cells: {len(all_cells)}")
+                lost_cells = tuple(sorted(lost_edge))
+                gained_cells = tuple(sorted(gained_edge))
+                edges_to_check = [
+                    tuple(sorted((lost_cells[0], gained_cells[0]))),
+                    tuple(sorted((lost_cells[0], gained_cells[1]))),
+                    tuple(sorted((lost_cells[1], gained_cells[0]))),
+                    tuple(sorted((lost_cells[1], gained_cells[1])))
+                ]
+                print("Required connecting edges:", edges_to_check)
+                edges_t = set(tuple(sorted(e)) for e in G1.edges())
+                edges_t_plus_1 = set(tuple(sorted(e)) for e in G2.edges())
+                print(f"Frame t edges: {edges_t}")
+                print(f"Frame t+1 edges: {edges_t_plus_1}")
+            return valid
+
+        analyzer._validate_t1_transition = debug_validate_t1
+
+        # Run analysis
+        print("\nRunning sequence analysis...")
         results = analyzer.analyze_sequence(sequence)
 
-        # Check that intercalations were detected
+        # Debug results
+        print("\nAnalysis Results:")
+        print(f"Total edges found: {len(results.edges)}")
+        for edge_id, edge_data in results.edges.items():
+            print(f"\nEdge {edge_id}:")
+            print(f"Frames: {edge_data.frames}")
+            print(f"Cell pairs: {edge_data.cell_pairs}")
+            print(f"Number of intercalations: {len(edge_data.intercalations)}")
+            for event in edge_data.intercalations:
+                print(f"  Intercalation at frame {event.frame}: {event.losing_cells} → {event.gaining_cells}")
+
+        # Original assertions
         assert len(results.edges) > 0
         intercalation_count = sum(
             len(edge.intercalations)
             for edge in results.edges.values()
             if edge.intercalations
         )
+        print(f"\nTotal intercalation count: {intercalation_count}")
         assert intercalation_count > 0
 
     def test_edge_tracking(self, analyzer):
@@ -266,8 +348,11 @@ class TestEdgeAnalyzer:
         """Test filtering of isolated edges"""
         # Create segmentation with an isolated edge
         seg = create_test_segmentation()
-        seg[15:18, 15:18] = 5  # Add isolated cell
-
+        seg[15:18, 12:15] = 5
+        seg[15:18, 15:18] = 6  # Add isolated cell pair
+        # import matplotlib.pyplot as plt
+        # plt.imshow(seg)
+        # plt.show()
         # Test with filtering enabled
         analyzer.params.filter_isolated = True
         boundaries = analyzer._detect_edges(seg)
@@ -576,24 +661,84 @@ class TestEdgeAnalysisWidget:
 
             print("\nTest completed successfully")
 
-    @patch('napariCellFlow.edge_analysis_widget.EdgeAnalysisWidget._get_output_directory')
-    def test_visualization_generation(self, mock_get_dir, qtbot, widget):
-        """Test visualization generation"""
-        # Setup mock results
-        widget._current_results = EdgeAnalysisResults(widget.analysis_params)
-        mock_get_dir.return_value = Path('/tmp/test_output')
 
-        # Enable all visualization types
-        widget.tracking_checkbox.setChecked(True)
-        widget.edge_checkbox.setChecked(True)
-        widget.intercalation_checkbox.setChecked(True)
-        widget.edge_length_checkbox.setChecked(True)
-        widget.example_gifs_checkbox.setChecked(True)
+    @pytest.mark.parametrize("visualization_config", [
+        {"tracking": True, "edge": False, "intercalation": False, "length": False, "gifs": False}
+    ])
+    @patch('napariCellFlow.edge_analysis_widget.QThread')
+    @patch('napariCellFlow.edge_analysis_visualization.Visualizer')
+    @patch('napariCellFlow.edge_analysis_widget.VisualizationWorker')
+    @patch('napariCellFlow.edge_analysis_widget.EdgeAnalysisWidget._get_output_directory')
+    def test_visualization_generation(self, mock_get_dir, mock_worker_class, mock_visualizer_class, mock_qthread, visualization_config, qtbot, widget, tmp_path):
+        """Test that visualization generation process works correctly"""
+        print("\n=== Starting test_visualization_generation ===")
+
+        # Create mock visualizer instance
+        mock_visualizer_instance = Mock()
+        mock_visualizer_class.return_value = mock_visualizer_instance
+
+        # Replace widget's visualizer with our mock
+        widget.visualizer = mock_visualizer_instance
+
+        # Setup test data and mock results
+        print("\nSetting up test data...")
+        test_data = create_test_sequence()
+        widget._current_results = EdgeAnalysisResults(widget.analysis_params)
+        mock_edge = Mock()
+        mock_edge.frames = [0, 1]
+        mock_edge.cell_pairs = [(1, 2), (2, 3)]
+        mock_edge.coordinates = [np.array([[0, 0], [1, 1]]), np.array([[1, 1], [2, 2]])]
+        mock_edge.lengths = [1.0, 1.414]
+        mock_edge.intercalations = [Mock(frame=0, losing_cells=(1, 2), gaining_cells=(2, 3))]
+        widget._current_results.edges = {'edge1': mock_edge}
+        widget._current_results.set_segmentation_data(test_data)
+        widget.segmentation_data = test_data
+
+        # Set output directory
+        output_dir = tmp_path / "visualization_test"
+        mock_get_dir.return_value = output_dir
+
+        # Create mock worker that will emit signals
+        print("\nSetting up mock worker...")
+        mock_worker = Mock()
+        mock_worker.progress = Signal(int, str)
+        mock_worker.finished = Signal()
+        mock_worker.error = Signal(Exception)
+        mock_worker_class.return_value = mock_worker
+
+        # Configure visualization options
+        widget.tracking_checkbox.setChecked(visualization_config["tracking"])
+        widget.edge_checkbox.setChecked(visualization_config["edge"])
+        widget.intercalation_checkbox.setChecked(visualization_config["intercalation"])
+        widget.edge_length_checkbox.setChecked(visualization_config["length"])
+        widget.example_gifs_checkbox.setChecked(visualization_config["gifs"])
         qtbot.wait(100)
 
         # Generate visualizations
-        widget.generate_vis_btn.click()
+        print("\nGenerating visualizations...")
+        widget._generate_visualizations()
         qtbot.wait(100)
 
-        # Check that visualization was attempted
+        # Verify worker was created with correct parameters
+        print("\nChecking worker creation...")
+        mock_worker_class.assert_called_once()
+
+        args, _ = mock_worker_class.call_args
+        print(f"\nWorker creation args: {args}")
+
+        # Verify the arguments
+        visualizer, results, output_directory = args
+        assert visualizer == mock_visualizer_instance
+        assert isinstance(results, EdgeAnalysisResults)
+        assert results == widget._current_results
+        assert output_directory == output_dir
+
+        # Verify visualization thread setup
         assert widget._visualization_thread is not None
+        assert widget._visualization_worker is not None
+        assert widget._visualization_worker == mock_worker
+
+        # Clean up
+        if widget._visualization_thread and widget._visualization_thread.isRunning():
+            widget._visualization_thread.quit()
+            widget._visualization_thread.wait()
