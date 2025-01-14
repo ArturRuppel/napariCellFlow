@@ -128,10 +128,9 @@ class EdgeAnalyzer:
         edges_t = set(tuple(sorted(e)) for e in G1.edges())
         edges_t_plus_1 = set(tuple(sorted(e)) for e in G2.edges())
 
-        # Check if connecting edges exist in both frames
-        # Note: The exact edges that should be present depends on the transition timing
+        # Changed this part: now check that connecting edges exist in BOTH frames
         connecting_edges_exist = all(
-            e in edges_t or e in edges_t_plus_1
+            (e in edges_t and e in edges_t_plus_1)
             for e in edges_to_check
             if e != lost_cells and e != gained_cells
         )
