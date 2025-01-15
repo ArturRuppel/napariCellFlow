@@ -130,6 +130,179 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
         self._update_ui_state()
 
+    def _create_parameters_group(self) -> QGroupBox:
+        """Create unified parameters group"""
+        group = QGroupBox("Analysis Parameters")
+        layout = QFormLayout()
+        layout.setSpacing(4)
+
+        # Configure dilation control
+        self.dilation_spin.setRange(1, 10)
+        self.dilation_spin.setValue(self.analysis_params.dilation_radius)
+        self.dilation_spin.setToolTip("Radius for morphological dilation when finding boundaries")
+        layout.addRow("Dilation Radius:", self.dilation_spin)
+
+        # Configure overlap control
+        self.overlap_spin.setRange(1, 100)
+        self.overlap_spin.setValue(self.analysis_params.min_overlap_pixels)
+        self.overlap_spin.setToolTip("Minimum number of overlapping pixels to consider cells as neighbors")
+        layout.addRow("Min Overlap Pixels:", self.overlap_spin)
+
+        # Configure length control
+        self.min_length_spin.setRange(0.0, 1000.0)
+        self.min_length_spin.setValue(self.analysis_params.min_edge_length)
+        self.min_length_spin.setSingleStep(0.5)
+        self.min_length_spin.setToolTip("Minimum edge length in pixels (0 to disable)")
+        layout.addRow("Min Edge Length (px):", self.min_length_spin)
+
+        # Add pixel size control
+        self.pixel_size_spin = QDoubleSpinBox()
+        self.pixel_size_spin.setRange(0.001, 1000.0)
+        self.pixel_size_spin.setValue(1.0)
+        self.pixel_size_spin.setSingleStep(0.1)
+        self.pixel_size_spin.setDecimals(3)
+        self.pixel_size_spin.setToolTip("Pixel size in micrometers")
+        layout.addRow("Pixel Size (µm):", self.pixel_size_spin)
+
+        # Add frame length control
+        self.frame_length_spin = QDoubleSpinBox()
+        self.frame_length_spin.setRange(0.1, 1000.0)
+        self.frame_length_spin.setValue(1.0)
+        self.frame_length_spin.setSingleStep(0.1)
+        self.frame_length_spin.setDecimals(1)
+        self.frame_length_spin.setToolTip("Time between frames in minutes")
+        layout.addRow("Frame Length (min):", self.frame_length_spin)
+
+        # Configure filter control
+        self.filter_isolated_check.setChecked(self.analysis_params.filter_isolated)
+        self.filter_isolated_check.setToolTip("Filter out edges that don't connect to others")
+        layout.addRow("Filter Isolated:", self.filter_isolated_check)
+
+        # Add reset button at the bottom of parameters
+        layout.addRow(self.reset_btn)
+
+        group.setLayout(layout)
+        return group
+
+    def _initialize_controls(self):
+        """Initialize all UI controls"""
+        # Analysis parameters controls
+        self.dilation_spin = QSpinBox()
+        self.overlap_spin = QSpinBox()
+        self.min_length_spin = QDoubleSpinBox()
+        self.filter_isolated_check = QCheckBox()
+
+        # Physical units controls
+        self.pixel_size_spin = QDoubleSpinBox()
+        self.frame_length_spin = QDoubleSpinBox()
+
+        # Visualization controls - all checked by default
+        self.tracking_checkbox = QCheckBox("Cell tracking plots")
+        self.tracking_checkbox.setChecked(True)
+
+        self.edge_checkbox = QCheckBox("Edge detection overlays")
+        self.edge_checkbox.setChecked(True)
+
+        self.intercalation_checkbox = QCheckBox("Intercalation event plots")
+        self.intercalation_checkbox.setChecked(True)
+
+        self.edge_length_checkbox = QCheckBox("Edge length evolution plots")
+        self.edge_length_checkbox.setChecked(True)
+
+        self.example_gifs_checkbox = QCheckBox("Create example GIFs")
+        self.example_gifs_checkbox.setChecked(True)
+
+        self.max_gifs_spinbox = QSpinBox()
+
+        # Action buttons
+        self.analyze_btn = QPushButton("Run Edge Analysis")
+        self.generate_vis_btn = QPushButton("Generate Visualizations")
+        self.save_btn = QPushButton("Save Results")
+        self.load_btn = QPushButton("Load Results")
+        self.reset_btn = QPushButton("Reset Parameters")
+
+    def _register_controls(self):
+        """Register all controls with base widget"""
+        for control in [
+            self.dilation_spin,
+            self.overlap_spin,
+            self.min_length_spin,
+            self.filter_isolated_check,
+            self.pixel_size_spin,  # Add new control
+            self.frame_length_spin,  # Add new control
+            self.tracking_checkbox,
+            self.edge_checkbox,
+            self.intercalation_checkbox,
+            self.edge_length_checkbox,
+            self.example_gifs_checkbox,
+            self.max_gifs_spinbox,
+            self.analyze_btn,
+            self.generate_vis_btn,
+            self.save_btn,
+            self.load_btn,
+            self.reset_btn,
+            self.vis_reset_btn
+        ]:
+            self.register_control(control)
+
+    def _handle_analysis_complete(self, results):
+        """Handle completion of analysis"""
+        try:
+            self._current_results = results
+
+            # Add metadata about units and parameters
+            results.update_metadata('pixel_size_um', self.pixel_size_spin.value())
+            results.update_metadata('frame_length_min', self.frame_length_spin.value())
+            results.update_metadata('units_info', {
+                'Coordinates are stored in pixels, edge lengths are stored in µm'
+            })
+
+            # Convert lengths to physical units
+            pixel_size = self.pixel_size_spin.value()
+            for edge_data in results.edges.values():
+                edge_data.lengths = [length * pixel_size for length in edge_data.lengths]
+
+            # Add segmentation data to results
+            results.set_segmentation_data(self.segmentation_data)
+
+            self.data_manager.analysis_results = results
+
+            boundaries_by_frame = self._extract_boundaries(results)
+            self._current_boundaries = boundaries_by_frame
+
+            # Update visualizations
+            self.vis_manager.update_edge_visualization(boundaries_by_frame)
+            self.vis_manager.update_intercalation_visualization(results)
+            self.vis_manager.update_edge_analysis_visualization(results)
+
+            self.save_btn.setEnabled(True)
+            self.processing_completed.emit(results)
+
+            # Calculate final statistics
+            intercalation_count = sum(
+                len(edge.intercalations)
+                for edge in results.edges.values()
+                if edge.intercalations
+            )
+
+            self._update_status(
+                f"Analysis complete - found {len(results.edges)} edges and {intercalation_count} intercalations",
+                100
+            )
+
+        except Exception as e:
+            self._handle_analysis_error(e)
+        finally:
+            self._set_controls_enabled(True)
+
+    def reset_parameters(self):
+        """Reset all parameters to defaults simultaneously"""
+        super().reset_parameters()  # Keep existing reset logic
+
+        # Reset new parameters
+        self.pixel_size_spin.setValue(1.0)
+        self.frame_length_spin.setValue(1.0)
+
     def _generate_visualizations(self):
         """Generate visualizations based on current configuration"""
         try:
@@ -194,6 +367,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 component=self.__class__.__name__
             ))
             self._set_controls_enabled(True)
+
     def _handle_visualization_progress(self, progress: int, message: str):
         """Handle progress updates from visualization worker"""
         self._update_status(message, progress)
@@ -252,42 +426,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         layout.addWidget(self.load_btn)
 
         self.save_btn.setEnabled(False)
-
-        group.setLayout(layout)
-        return group
-
-    def _create_parameters_group(self) -> QGroupBox:
-        """Create unified parameters group"""
-        group = QGroupBox("Analysis Parameters")
-        layout = QFormLayout()
-        layout.setSpacing(4)
-
-        # Configure dilation control
-        self.dilation_spin.setRange(1, 10)
-        self.dilation_spin.setValue(self.analysis_params.dilation_radius)
-        self.dilation_spin.setToolTip("Radius for morphological dilation when finding boundaries")
-        layout.addRow("Dilation Radius:", self.dilation_spin)
-
-        # Configure overlap control
-        self.overlap_spin.setRange(1, 100)
-        self.overlap_spin.setValue(self.analysis_params.min_overlap_pixels)
-        self.overlap_spin.setToolTip("Minimum number of overlapping pixels to consider cells as neighbors")
-        layout.addRow("Min Overlap Pixels:", self.overlap_spin)
-
-        # Configure length control
-        self.min_length_spin.setRange(0.0, 1000.0)
-        self.min_length_spin.setValue(self.analysis_params.min_edge_length)
-        self.min_length_spin.setSingleStep(0.5)
-        self.min_length_spin.setToolTip("Minimum edge length in pixels (0 to disable)")
-        layout.addRow("Min Edge Length:", self.min_length_spin)
-
-        # Configure filter control
-        self.filter_isolated_check.setChecked(self.analysis_params.filter_isolated)
-        self.filter_isolated_check.setToolTip("Filter out edges that don't connect to others")
-        layout.addRow("Filter Isolated:", self.filter_isolated_check)
-
-        # Add reset button at the bottom of parameters
-        layout.addRow(self.reset_btn)
 
         group.setLayout(layout)
         return group
@@ -365,61 +503,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
         # Register all controls
         self._register_controls()
-
-    def _initialize_controls(self):
-        """Initialize all UI controls"""
-        # Analysis parameters controls
-        self.dilation_spin = QSpinBox()
-        self.overlap_spin = QSpinBox()
-        self.min_length_spin = QDoubleSpinBox()
-        self.filter_isolated_check = QCheckBox()
-
-        # Visualization controls - all checked by default
-        self.tracking_checkbox = QCheckBox("Cell tracking plots")
-        self.tracking_checkbox.setChecked(True)
-
-        self.edge_checkbox = QCheckBox("Edge detection overlays")
-        self.edge_checkbox.setChecked(True)
-
-        self.intercalation_checkbox = QCheckBox("Intercalation event plots")
-        self.intercalation_checkbox.setChecked(True)
-
-        self.edge_length_checkbox = QCheckBox("Edge length evolution plots")
-        self.edge_length_checkbox.setChecked(True)
-
-        self.example_gifs_checkbox = QCheckBox("Create example GIFs")
-        self.example_gifs_checkbox.setChecked(True)
-
-        self.max_gifs_spinbox = QSpinBox()
-
-        # Action buttons
-        self.analyze_btn = QPushButton("Run Edge Analysis")
-        self.generate_vis_btn = QPushButton("Generate Visualizations")
-        self.save_btn = QPushButton("Save Results")
-        self.load_btn = QPushButton("Load Results")
-        self.reset_btn = QPushButton("Reset Parameters")
-
-    def _register_controls(self):
-        """Register all controls with base widget"""
-        for control in [
-            self.dilation_spin,
-            self.overlap_spin,
-            self.min_length_spin,
-            self.filter_isolated_check,
-            self.tracking_checkbox,
-            self.edge_checkbox,
-            self.intercalation_checkbox,
-            self.edge_length_checkbox,
-            self.example_gifs_checkbox,
-            self.max_gifs_spinbox,
-            self.analyze_btn,
-            self.generate_vis_btn,
-            self.save_btn,
-            self.load_btn,
-            self.reset_btn,
-            self.vis_reset_btn
-        ]:
-            self.register_control(control)
 
     def _create_action_group(self) -> QGroupBox:
         """Create action buttons group"""
@@ -586,44 +669,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             ))
             self._set_controls_enabled(True)
 
-    def _handle_analysis_complete(self, results):
-        """Handle completion of analysis"""
-        try:
-            self._current_results = results
-
-            # Add segmentation data to results
-            results.set_segmentation_data(self.segmentation_data)
-
-            self.data_manager.analysis_results = results
-
-            boundaries_by_frame = self._extract_boundaries(results)
-            self._current_boundaries = boundaries_by_frame
-
-            # Update visualizations
-            self.vis_manager.update_edge_visualization(boundaries_by_frame)
-            self.vis_manager.update_intercalation_visualization(results)
-            self.vis_manager.update_edge_analysis_visualization(results)
-
-            self.save_btn.setEnabled(True)
-            self.processing_completed.emit(results)
-
-            # Calculate final statistics
-            intercalation_count = sum(
-                len(edge.intercalations)
-                for edge in results.edges.values()
-                if edge.intercalations
-            )
-
-            self._update_status(
-                f"Analysis complete - found {len(results.edges)} edges and {intercalation_count} intercalations",
-                100
-            )
-
-        except Exception as e:
-            self._handle_analysis_error(e)
-        finally:
-            self._set_controls_enabled(True)
-
     def _handle_progress(self, progress: int, message: str):
         """Handle progress updates from worker"""
         self._update_status(message, progress)
@@ -662,32 +707,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 message=f"Invalid parameters: {str(e)}",
                 component=self.__class__.__name__
             )
-
-    def reset_parameters(self):
-        """Reset all parameters to defaults simultaneously"""
-        default_params = EdgeAnalysisParams()
-
-        # Update UI controls without triggering individual signals
-        self.dilation_spin.blockSignals(True)
-        self.overlap_spin.blockSignals(True)
-        self.min_length_spin.blockSignals(True)
-        self.filter_isolated_check.blockSignals(True)
-
-        self.dilation_spin.setValue(default_params.dilation_radius)
-        self.overlap_spin.setValue(default_params.min_overlap_pixels)
-        self.min_length_spin.setValue(default_params.min_edge_length)
-        self.filter_isolated_check.setChecked(default_params.filter_isolated)
-
-        self.dilation_spin.blockSignals(False)
-        self.overlap_spin.blockSignals(False)
-        self.min_length_spin.blockSignals(False)
-        self.filter_isolated_check.blockSignals(False)
-
-        # Update parameters once at the end
-        self.params = default_params
-        self.analyzer.update_parameters(default_params)
-        self.parameters_updated.emit()
-        self._update_status("Parameters reset to defaults")
 
     def save_results(self):
         """Save the current analysis results"""
