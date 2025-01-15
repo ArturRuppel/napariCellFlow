@@ -2,7 +2,37 @@
 Welcome to napariCellFlow! This tool helps you analyze cellular dynamics in microscopy data through an intuitive, step-by-step workflow. By combining Cellpose's powerful cell segmentation with dedicated tracking and edge analysis capabilities, napariCellFlow makes it straightforward to study cell behavior, track movements, and identify intercalation events in your time-lapse images. As a napari plugin, it provides interactive visualizations and immediate feedback at each step of your analysis pipeline, from initial preprocessing through to final results.
 
 ## Installation
-[Installation instructions to be added]
+
+### Prerequisites
+- Windows operating system
+- No administrator rights required
+- Internet connection for downloading installers
+
+### Step 1: Install Miniconda
+1. Download the latest Miniconda installer for Windows (64-bit) from https://docs.conda.io/en/latest/miniconda.html
+2. Run the installer with these settings:
+   - Choose "Install for Just Me (recommended)"
+   - Select installation folder in your user directory (e.g., `C:\Users\YourUsername\Miniconda3`)
+   - Uncheck "Add Miniconda to the system PATH environment variable"
+   - Complete the installation
+
+### Step 2: Create napariCellFlow Environment
+1. Open "Miniconda Prompt" from the Start Menu
+2. Navigate to your project folder:
+   - To find the path: Open Windows Explorer, navigate to your folder, click the address bar (or Alt + D), and copy the path
+   - In Miniconda Prompt, type: `cd "YOUR_COPIED_PATH"`
+3. Create and activate the environment:
+   ```bash
+   conda create -n cellflow python=3.9
+   conda activate cellflow
+   ```
+
+### Step 3: Install napariCellFlow
+With the cellflow environment activated:
+```bash
+pip install -e .
+```
+
 
 ## Overview
 
