@@ -1,2 +1,0 @@
-[napari.manifest]
-napariCellFlow = napariCellFlow:napari.yaml
