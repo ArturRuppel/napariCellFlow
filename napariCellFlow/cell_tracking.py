@@ -1,15 +1,10 @@
 import logging
-from typing import Dict, List, Tuple, Set
-import cProfile
-import pstats
-import io
-from pathlib import Path
-from dataclasses import dataclass
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Set
 
 import numpy as np
 from skimage.measure import regionprops
-import tifffile
 
 from napariCellFlow.structure import TrackingParameters, AnalysisConfig
 
@@ -18,7 +13,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RegionCache:
-    """Cache for region properties to avoid recomputation"""
+    """Cache container for frequently accessed region properties.
+
+    This dataclass stores essential properties of segmented regions to avoid
+    repeated computation during the tracking process. It significantly
+    improves performance for large datasets by caching frequently accessed
+    measurements.
+
+    Attributes:
+        label (int): Unique identifier for the region
+        centroid (np.ndarray): Region centroid coordinates as [y, x]
+        area (float): Region area in pixels
+        coords (np.ndarray): Array of region pixel coordinates as [[y1, x1], [y2, x2], ...]
+    """
     label: int
     centroid: np.ndarray
     area: float
@@ -26,23 +33,80 @@ class RegionCache:
 
 
 class CellTracker:
+    """Tracks cells across time series of segmentation masks.
+
+    This class implements an overlap-based tracking algorithm with support for
+    gap closing, designed for tracking cells in microscopy time series data.
+    It uses a combination of spatial overlap and displacement metrics to
+    establish cell identity across frames.
+
+    The tracker can handle:
+    - Cell movement within specified displacement limits
+    - Temporary cell disappearance through gap closing
+    - Size-based filtering of detected objects
+    - Progress monitoring through callbacks
+
+    Args:
+        config (AnalysisConfig): Configuration object containing analysis settings
+
+    Attributes:
+        config (AnalysisConfig): Current analysis configuration
+        params (TrackingParameters): Current tracking parameters
+        _region_cache (dict): Cache of computed region properties
+        _progress_callback (Optional[Callable]): Function for progress updates
+    """
     def __init__(self, config: 'AnalysisConfig'):
+        """Initialize tracker with configuration settings."""
         self.config = config
         self.params = TrackingParameters()
         self._region_cache = {}
         self._progress_callback = None
 
     def set_progress_callback(self, callback):
-        """Set callback function for progress updates"""
+        """Set callback function for tracking progress updates.
+
+        Args:
+            callback: Function that takes progress (float 0-100) and
+                     message (str) arguments
+        """
         self._progress_callback = callback
 
     def _update_progress(self, progress: float, message: str = ""):
-        """Update progress through callback if available"""
+        """Update tracking progress through callback if available.
+
+        Args:
+            progress: Current progress as percentage (0-100)
+            message: Optional status message to display
+        """
         if self._progress_callback:
             self._progress_callback(progress, message)
 
     def track_cells(self, segmentation_stack: np.ndarray) -> np.ndarray:
-        """Track cells across frames using current parameters."""
+        """Track cells across all frames in the segmentation stack.
+
+        Implements a multi-step tracking process:
+        1. Validates input and initializes tracking
+        2. Optionally filters small objects
+        3. Establishes cell identities in first frame
+        4. Tracks cells frame by frame using overlap detection
+        5. Performs gap closing if enabled
+
+        Args:
+            segmentation_stack: 3D numpy array (t, x, y) containing
+                              segmentation masks with unique labels
+
+        Returns:
+            3D numpy array with consistent cell labels across frames
+
+        Raises:
+            ValueError: If input dimensions are invalid
+
+        Notes:
+            - Cell IDs remain consistent across frames where possible
+            - New IDs are assigned to newly appearing cells
+            - Gap closing can maintain IDs across temporary disappearances
+            - Progress updates are provided through callback if set
+        """
         if len(segmentation_stack.shape) != 3:
             raise ValueError("Expected 3D stack (t, x, y)")
 
@@ -143,7 +207,26 @@ class CellTracker:
             assigned_ids: Set[int],
             segmentation_stack: np.ndarray
     ) -> Dict[int, Dict[int, Tuple[int, np.ndarray]]]:
-        """Gap closing that returns assignments for future frames."""
+        """Handle tracking of temporarily disappeared cells.
+
+                Looks ahead up to max_frame_gap frames to find reappearing cells
+                and maintains their original IDs.
+
+                Args:
+                    tracked_segmentation: Current tracking results
+                    current_frame: Index of current frame
+                    overlap_matrix: Matrix of cell overlaps
+                    assigned_ids: Set of assigned cell IDs
+                    segmentation_stack: Original segmentation data
+
+                Returns:
+                    Dictionary mapping future frames to cell assignments
+
+                Notes:
+                    - Adjusts matching criteria based on gap length
+                    - Uses combination of spatial and overlap metrics
+                    - Preserves cell IDs across gaps when possible
+                """
         logger.debug(f"=== Starting gap closing for frame {current_frame} ===")
         logger.debug(f"Track matrix shape: {tracked_segmentation.shape}")
         logger.debug(f"Max frame gap: {self.params.max_frame_gap}")
@@ -229,12 +312,30 @@ class CellTracker:
         return frame_assignments
 
     def update_parameters(self, new_params: TrackingParameters):
-        """Update tracking parameters"""
+        """Update tracking parameters and clear region cache.
+
+        Args:
+            new_params: New tracking parameters to use
+
+        Note:
+            Clears region cache since parameters affect region processing
+        """
         self.params = new_params
         self._region_cache.clear()
 
     def _cache_regions(self, frame: np.ndarray, frame_idx: int) -> List[RegionCache]:
-        """Cache region properties for a frame"""
+        """Cache region properties for efficient reuse.
+
+        Args:
+            frame: 2D segmentation mask
+            frame_idx: Index of current frame
+
+        Returns:
+            List of cached region properties
+
+        Note:
+            Uses frame content hash as cache key to detect changes
+        """
         cache_key = (frame_idx, hash(frame.tobytes()))
         if cache_key in self._region_cache:
             return self._region_cache[cache_key]
@@ -260,7 +361,20 @@ class CellTracker:
             assigned_ids: Set[int],
             all_used_ids: Set[int]
     ) -> None:
-        """Optimized region processing avoiding expensive unique operations"""
+        """Process and assign cell IDs in current frame.
+
+        Args:
+            current_frame: Current segmentation mask
+            output_frame: Output array for tracked cells
+            overlap_matrix: Matrix of cell overlaps
+            assigned_ids: Set of assigned cell IDs
+            all_used_ids: Set of all used cell IDs
+
+        Notes:
+            - Processes matched cells first
+            - Assigns new IDs to unmatched cells
+            - Uses memory-efficient operations for large arrays
+        """
         # Process matched cells first
         for current_id, candidates in overlap_matrix.items():
             for next_id, _, score in candidates:
@@ -298,7 +412,28 @@ class CellTracker:
             max_displacement: float,
             min_overlap_ratio: float
     ) -> Dict[int, List[Tuple[int, int, float]]]:
-        """Optimized overlap calculation using cached region properties"""
+        """Calculate cell overlap scores between consecutive frames.
+
+        Uses a combination of spatial overlap and centroid displacement
+        to score potential cell matches.
+
+        Args:
+            current_frame: Current frame segmentation
+            next_frame: Next frame segmentation
+            current_idx: Index of current frame
+            next_idx: Index of next frame
+            max_displacement: Maximum allowed cell displacement
+            min_overlap_ratio: Minimum required overlap ratio
+
+        Returns:
+            Dictionary mapping current cell IDs to candidate matches,
+            sorted by match score
+
+        Notes:
+            - Uses vectorized operations for efficiency
+            - Combines overlap ratio and displacement for scoring
+            - Caches region properties to avoid recomputation
+        """
         overlap_matrix = defaultdict(list)
 
         # Get regions for both frames
