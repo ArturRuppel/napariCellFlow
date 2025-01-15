@@ -15,7 +15,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EdgeGroup:
-    """Tracks a group of related edges through intercalations"""
+    """Tracks a group of related edges through intercalations.
+
+    This class maintains the relationships between edges that are connected through
+    T1 transitions, allowing tracking of edge identity through topology changes.
+
+    Attributes:
+        group_id (int): Unique identifier for this edge group
+        edge_ids (Set[int]): Set of edge IDs that belong to this group
+        cell_pairs (Set[FrozenSet[int]]): Set of cell pairs involved in these edges
+        frames (List[int]): List of frames where edges in this group appear
+        active (bool): Flag indicating if group is still active in tracking
+    """
     group_id: int
     edge_ids: Set[int] = field(default_factory=set)
     cell_pairs: Set[FrozenSet[int]] = field(default_factory=set)
@@ -24,9 +35,33 @@ class EdgeGroup:
 
 
 class EdgeAnalyzer:
-    """Unified analyzer for edge dynamics and intercalations"""
+    """Unified analyzer for edge dynamics and intercalations in cell tissues.
+
+    This class provides comprehensive analysis of cell boundaries and topology
+    changes in segmented microscopy data. It can detect and track edges between
+    cells, identify T1 transitions, and maintain edge identity through topology
+    changes.
+
+    The analyzer uses a combination of image processing and graph theory approaches
+    to robustly track edge dynamics and detect intercalation events.
+
+    Attributes:
+        params (EdgeAnalysisParams): Configuration parameters for analysis
+        next_edge_id (int): Counter for generating unique edge IDs
+        next_group_id (int): Counter for generating unique group IDs
+        _edge_history (dict): Internal tracking of edge data
+        _edge_groups (dict): Internal tracking of edge groups
+        _cell_pair_to_edge_id (dict): Mapping of cell pairs to edge IDs
+        _edge_to_group (dict): Mapping of edges to their groups
+        _frame_graphs (dict): NetworkX graphs for each frame
+    """
 
     def __init__(self, params: Optional[EdgeAnalysisParams] = None):
+        """Initialize edge analyzer with given parameters.
+
+        Args:
+            params: Configuration parameters for analysis. If None, uses defaults.
+        """
         self.params = params or EdgeAnalysisParams()
         self.next_edge_id = 1
         self.next_group_id = 1
@@ -37,11 +72,19 @@ class EdgeAnalyzer:
         self._frame_graphs = {}
 
     def _normalize_cell_pair(self, cells: Union[Tuple[int, int], List[int], np.ndarray]) -> Tuple[Union[FrozenSet[int], Tuple[int, int]], Tuple[int, int]]:
-        """
-        Convert cell pair to both frozenset and ordered tuple representations
+        """Convert cell pair to both frozenset and ordered tuple representations.
+
+        Creates standardized representations of cell pairs for both tracking (using
+        frozenset) and visualization (using ordered tuple).
+
+        Args:
+            cells: Cell pair in any supported format (tuple, list, or array)
 
         Returns:
             Tuple containing (frozenset_representation, ordered_tuple_representation)
+
+        Raises:
+            ValueError: If input is not exactly 2 cells
         """
         if isinstance(cells, (tuple, list, np.ndarray)) and len(cells) == 2:
             # Create ordered tuple (for visualization)
@@ -53,7 +96,16 @@ class EdgeAnalyzer:
             raise ValueError("Cell pair must be a tuple/list/array of exactly 2 cells")
 
     def _create_edge_data(self, edge_id: int, frame: int, boundary: CellBoundary) -> EdgeData:
-        """Initialize new edge tracking data"""
+        """Initialize new edge tracking data.
+
+        Args:
+            edge_id: Unique identifier for the edge
+            frame: Frame number where edge first appears
+            boundary: Detected boundary between cells
+
+        Returns:
+            New EdgeData object with initial tracking information
+        """
         _, ordered_pair = self._normalize_cell_pair(boundary.cell_ids)
         return EdgeData(
             edge_id=edge_id,
@@ -64,7 +116,13 @@ class EdgeAnalyzer:
         )
 
     def _update_edge_data(self, edge_data: EdgeData, frame: int, boundary: CellBoundary) -> None:
-        """Add new frame data to existing edge"""
+        """Add new frame data to existing edge tracking information.
+
+        Args:
+            edge_data: Existing tracking data to update
+            frame: Current frame number
+            boundary: New boundary information
+        """
         _, ordered_pair = self._normalize_cell_pair(boundary.cell_ids)
         edge_data.frames.append(frame)
         edge_data.cell_pairs.append(ordered_pair)  # Store ordered tuple
@@ -72,7 +130,15 @@ class EdgeAnalyzer:
         edge_data.coordinates.append(boundary.coordinates)
 
     def _update_edge_histories(self, frame: int, boundaries: List[CellBoundary]):
-        """Update edge tracking histories"""
+        """Update edge tracking histories with new frame data.
+
+        Processes all boundaries in a frame to maintain edge tracking information.
+        Creates new tracking entries for new edges and updates existing ones.
+
+        Args:
+            frame: Current frame number
+            boundaries: List of detected boundaries in the frame
+        """
         for boundary in boundaries:
             frozen_pair, _ = self._normalize_cell_pair(boundary.cell_ids)
             edge_id = self._get_or_create_edge_id(frozen_pair)
@@ -83,7 +149,14 @@ class EdgeAnalyzer:
                 self._edge_history[edge_id] = self._create_edge_data(edge_id, frame, boundary)
 
     def _create_frame_graph(self, boundaries: List[CellBoundary]) -> nx.Graph:
-        """Create NetworkX graph representing cell connectivity"""
+        """Create NetworkX graph representing cell connectivity in a frame.
+
+        Args:
+            boundaries: List of detected boundaries
+
+        Returns:
+            NetworkX graph where nodes are cells and edges represent boundaries
+        """
         G = nx.Graph()
         for boundary in boundaries:
             _, ordered_pair = self._normalize_cell_pair(boundary.cell_ids)
@@ -91,7 +164,14 @@ class EdgeAnalyzer:
         return G
 
     def _get_or_create_edge_id(self, frozen_pair: FrozenSet[int]) -> int:
-        """Get existing edge ID or create new one"""
+        """Get existing edge ID or create new one for a cell pair.
+
+        Args:
+            frozen_pair: Frozenset representation of cell pair
+
+        Returns:
+            Edge ID (existing or new)
+        """
         if frozen_pair in self._cell_pair_to_edge_id:
             return self._cell_pair_to_edge_id[frozen_pair]
 
@@ -107,7 +187,14 @@ class EdgeAnalyzer:
             G1: nx.Graph,
             G2: nx.Graph
     ) -> bool:
-        """Validate that edge changes represent a true T1 transition"""
+        """Get existing edge ID or create new one for a cell pair.
+
+        Args:
+            frozen_pair: Frozenset representation of cell pair
+
+        Returns:
+            Edge ID (existing or new)
+        """
         # Check for four unique cells
         all_cells = lost_edge | gained_edge
         if len(all_cells) != 4:
@@ -139,11 +226,13 @@ class EdgeAnalyzer:
 
     def _create_edge_trajectories(self, boundaries_by_frame: Dict[int, List[CellBoundary]],
                                   intercalations: List[IntercalationEvent]) -> Dict[int, EdgeData]:
-        """
-        Create edge trajectories with forward-time merging logic.
+        """Create edge trajectories with forward-time merging logic.
+
+        Processes boundaries and intercalations to create complete edge trajectories
+        that maintain identity through topology changes.
 
         Args:
-            boundaries_by_frame: Dictionary mapping frame numbers to detected boundaries
+            boundaries_by_frame: Dictionary mapping frames to detected boundaries
             intercalations: List of detected intercalation events
 
         Returns:
@@ -237,7 +326,20 @@ class EdgeAnalyzer:
         return edge_trajectories
 
     def _merge_edge_groups(self, lost_edge: FrozenSet[int], gained_edge: FrozenSet[int], frame: int):
-        # Find all groups that contain either edge or any historically related edges
+        """Merge edge groups involved in a topology change.
+
+        Combines edge groups when edges are related through T1 transitions,
+        maintaining continuity of edge identity through topology changes.
+
+        Args:
+            lost_edge: Cell pair that disappears in transition
+            gained_edge: Cell pair that appears in transition
+            frame: Frame number where transition occurs
+
+        Note:
+            Updates the internal group mappings and edge relationships.
+            Creates new group if no existing groups are found.
+        """
         related_groups = set()
         for group in self._edge_groups.values():
             if lost_edge in group.cell_pairs or gained_edge in group.cell_pairs:
@@ -285,7 +387,23 @@ class EdgeAnalyzer:
                 self._edge_to_group[edge_id] = base_group_id
 
     def _detect_edges(self, frame_data: np.ndarray) -> List[CellBoundary]:
-        """Detect edges in a single frame"""
+        """Detect cell boundaries in a single frame.
+
+        Identifies and characterizes boundaries between all pairs of adjacent cells
+        in the segmented frame.
+
+        Args:
+            frame_data: 2D numpy array of segmented cells where each cell has a unique ID
+
+        Returns:
+            List of CellBoundary objects representing detected boundaries
+
+        Note:
+            Applies filtering based on configuration parameters including:
+            - Minimum overlap pixels
+            - Minimum edge length
+            - Isolation filtering (optional)
+        """
         boundaries = []
         cell_ids = np.unique(frame_data)
         cell_ids = cell_ids[cell_ids != 0]  # Remove background
@@ -304,7 +422,17 @@ class EdgeAnalyzer:
         return boundaries
 
     def _filter_isolated_edges(self, boundaries: List[CellBoundary]) -> List[CellBoundary]:
-        """Filter out edges that don't connect to others"""
+        """Filter out edges that don't form part of a connected network.
+
+        Removes boundaries where either cell only has one connection, as these
+        are likely artifacts or non-biological configurations.
+
+        Args:
+            boundaries: List of detected cell boundaries
+
+        Returns:
+            Filtered list of boundaries, excluding isolated edges
+        """
         # Build connectivity graph
         connections = defaultdict(set)
         for boundary in boundaries:
@@ -318,7 +446,15 @@ class EdgeAnalyzer:
                 and len(connections[int(b.cell_ids[1])]) > 1]
 
     def update_parameters(self, params: EdgeAnalysisParams) -> None:
-        """Update analysis parameters and reset state"""
+        """Update analysis parameters and reset internal state.
+
+        Args:
+            params: New parameters to use for analysis
+
+        Note:
+            This resets all internal tracking state, requiring reanalysis
+            of any sequence that needs to use the new parameters.
+        """
         self.params = params
         # Clear all internal state
         self._edge_history.clear()
@@ -330,7 +466,26 @@ class EdgeAnalyzer:
         self.next_group_id = 1
 
     def _find_shared_boundary(self, frame: np.ndarray, cell1_id: int, cell2_id: int) -> Optional[CellBoundary]:
-        """Find the shared boundary between two cells"""
+        """Find and characterize the shared boundary between two cells.
+
+        Uses image processing techniques to identify, measure, and validate
+        the boundary between adjacent cells.
+
+        Args:
+            frame: 2D array of segmented cells
+            cell1_id: ID of first cell
+            cell2_id: ID of second cell
+
+        Returns:
+            CellBoundary object if valid boundary found, None otherwise
+
+        Note:
+            Applies multiple validation steps:
+            1. Checks for sufficient overlap after dilation
+            2. Validates boundary pixel count
+            3. Applies minimum length threshold
+            4. Ensures proper skeletonization
+        """
         # Create cell masks
         mask1 = (frame == cell1_id).astype(np.uint8)
         mask2 = (frame == cell2_id).astype(np.uint8)
@@ -389,7 +544,21 @@ class EdgeAnalyzer:
         return boundary
 
     def _order_boundary_pixels(self, skeleton: np.ndarray) -> np.ndarray:
-        """Order pixels along the boundary from one endpoint to another"""
+        """Order pixels along the boundary from one endpoint to another.
+
+        Creates an ordered sequence of coordinates representing the boundary
+        between cells, ensuring proper connectivity and endpoint selection.
+
+        Args:
+            skeleton: Binary array representing skeletonized boundary
+
+        Returns:
+            Nx2 array of ordered (y,x) coordinates along the boundary
+
+        Note:
+            If exactly 2 endpoints aren't found, uses points furthest apart
+            to ensure consistent ordering.
+        """
         points = np.column_stack(np.where(skeleton))
         if len(points) <= 2:
             return points
@@ -441,7 +610,17 @@ class EdgeAnalyzer:
         return np.array(ordered)
 
     def _calculate_edge_length(self, coords: np.ndarray) -> float:
-        """Calculate physical length of edge"""
+        """Calculate the physical length of an edge.
+
+        Computes the total Euclidean length of the boundary by summing
+        the lengths of each segment between consecutive coordinates.
+
+        Args:
+            coords: Nx2 array of ordered (y,x) coordinates along the boundary
+
+        Returns:
+            Total length of the boundary in pixel units
+        """
         if len(coords) < 2:
             return 0.0
         diffs = np.diff(coords, axis=0)
@@ -449,7 +628,23 @@ class EdgeAnalyzer:
         return float(np.sum(segments))
 
     def _detect_topology_changes(self, frame: int, next_frame: int) -> List[IntercalationEvent]:
-        """Detect T1 transitions between consecutive frames using stable detection logic"""
+        """Detect T1 transitions between consecutive frames.
+
+        Identifies and validates potential intercalation events by comparing
+        cell connectivity graphs between frames.
+
+        Args:
+            frame: Index of first frame
+            next_frame: Index of second frame
+
+        Returns:
+            List of validated IntercalationEvent objects
+
+        Note:
+            Applies rigorous validation to ensure detected events represent
+            true T1 transitions rather than segmentation artifacts or other
+            topology changes.
+        """
         G1 = self._frame_graphs[frame]
         G2 = self._frame_graphs[next_frame]
 
@@ -507,7 +702,47 @@ class EdgeAnalyzer:
         return events
 
     def analyze_sequence(self, tracked_data: np.ndarray, progress_callback=None) -> EdgeAnalysisResults:
-        """Process complete sequence of frames"""
+        """Process and analyze a complete sequence of segmented frames.
+
+        This is the main analysis entry point that processes a sequence of segmented
+        cell frames to detect edges, track their evolution, and identify topology
+        changes (T1 transitions/intercalations).
+
+        Args:
+            tracked_data: 3D numpy array (frames, height, width) containing segmented
+                cell data where each cell has a unique integer ID. Background should
+                be labeled as 0.
+            progress_callback: Optional callback function(progress: int, message: str)
+                to report analysis progress. Progress ranges from 0-100.
+
+        Returns:
+            EdgeAnalysisResults object containing:
+                - Edge trajectories with lengths and coordinates
+                - Detected intercalation events
+                - Analysis metadata
+                - Original segmentation data
+
+        Raises:
+            ValueError: If tracked_data is not 3D or contains invalid cell IDs
+            TypeError: If tracked_data is not a numpy array
+
+        Note:
+            Processing steps:
+            1. Reset internal tracking state
+            2. Create edge graphs for each frame
+            3. Detect edges and update histories
+            4. Identify topology changes between consecutive frames
+            5. Build edge trajectories with identity tracking through T1s
+            6. Compile final results with metadata
+
+        Example:
+            >>> analyzer = EdgeAnalyzer()
+            >>> data = load_segmented_sequence()  # (frames, height, width)
+            >>> def progress(percent, message):
+            ...     print(f"{percent}%: {message}")
+            >>> results = analyzer.analyze_sequence(data, progress)
+            >>> print(f"Found {len(results.edges)} edge trajectories")
+        """
         logger.info("Starting edge analysis sequence...")
 
         # Reset state
