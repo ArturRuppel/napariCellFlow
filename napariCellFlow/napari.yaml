@@ -1,0 +1,10 @@
+name: napariCellFlow
+display_name: napariCellFlow
+contributions:
+  commands:
+    - id: napariCellFlow.launch
+      title: Launch napariCellFlow
+      python_name: napariCellFlow:napariCellFlow
+  widgets:
+    - command: napariCellFlow.launch
+      display_name: napariCellFlow

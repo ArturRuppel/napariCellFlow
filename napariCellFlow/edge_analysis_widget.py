@@ -297,12 +297,32 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
     def reset_parameters(self):
         """Reset all parameters to defaults simultaneously"""
-        super().reset_parameters()  # Keep existing reset logic
+        # Reset analysis parameters to defaults
+        self.dilation_spin.setValue(2)  # Default dilation radius
+        self.overlap_spin.setValue(5)  # Default minimum overlap pixels
+        self.min_length_spin.setValue(0.0)  # Default minimum edge length
+        self.filter_isolated_check.setChecked(True)  # Default filter isolated setting
 
-        # Reset new parameters
-        self.pixel_size_spin.setValue(1.0)
-        self.frame_length_spin.setValue(1.0)
+        # Reset physical unit parameters
+        self.pixel_size_spin.setValue(1.0)  # Default pixel size in micrometers
+        self.frame_length_spin.setValue(1.0)  # Default frame length in minutes
 
+        # Update the analysis parameters object
+        self.analysis_params = EdgeAnalysisParams(
+            dilation_radius=2,
+            min_overlap_pixels=5,
+            min_edge_length=0.0,
+            filter_isolated=True
+        )
+
+        # Update analyzer with new parameters
+        self.analyzer.update_parameters(self.analysis_params)
+
+        # Emit signal that parameters have been updated
+        self.parameters_updated.emit()
+
+        # Update status
+        self._update_status("Parameters reset to defaults")
     def _generate_visualizations(self):
         """Generate visualizations based on current configuration"""
         try:

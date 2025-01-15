@@ -1,1 +1,1 @@
-napari_cellpose_stackmode
+napariCellFlow

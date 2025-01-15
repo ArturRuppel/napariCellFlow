@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "napariCellFlow"
+version = "0.1.0"
+description = "A napari plugin for cell segmentation, tracking and analysis of cell-cell contacts in microscopy data"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Artur Ruppel, Claude AI", email = "artur@ruppel.pro"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Framework :: napari",
+]
+dependencies = [
+    "numpy>=1.26.4",
+    "cellpose>=3.1.0",
+    "tifffile>=2024.8.30",
+    "napari>=0.5.4",
+    "qtpy>=2.4.2",
+    "PyQt5>=5.15.0",
+    "PyYAML>=6.0.2",
+    "scikit-image>=0.24.0",
+    "networkx>=3.2.1",
+    "scipy>=1.13.1",
+    "matplotlib>=3.9.3",
+    "tqdm>=4.67.1",
+    "qtrangeslider>=0.1.5",
+    "opencv-python>=4.9.0",
+    "imageio>=2.34.0",
+]
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-qt>=4.4.0",
+    "black>=23.12.1",
+    "flake8>=7.0.0",
+]
+
+[project.entry-points."napari.manifest"]
+napariCellFlow = "napariCellFlow:napari.yaml"
+
+[tool.setuptools]
+packages = ["napariCellFlow"]
+
+[tool.setuptools.package-data]
+"napariCellFlow" = ["*.py", "*.yaml", "*.ico"]
+
