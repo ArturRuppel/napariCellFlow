@@ -42,20 +42,41 @@ class PreprocessingParameters:
 
 
 class ImagePreprocessor:
-    """Handles image preprocessing with explicit 8-bit conversion first"""
+    """Handles image preprocessing with standardized 8-bit output.
+
+    This class provides a pipeline for image preprocessing that includes:
+    - Bit depth conversion with outlier handling
+    - Intensity scaling
+    - Optional Gaussian and median filtering
+    - Optional CLAHE enhancement
+
+    All operations are performed in a specific order to ensure optimal results
+    and maintain image quality throughout the pipeline.
+    """
 
     def __init__(self, parameters: Optional[PreprocessingParameters] = None):
         self.params = parameters or PreprocessingParameters()
 
     def convert_to_8bit(self, image: np.ndarray) -> np.ndarray:
-        """
-        Convert any input image to 8-bit using percentile-based scaling.
+        """Convert any input image to 8-bit using percentile-based scaling.
+
+        Uses 1st and 99th percentiles to robustly handle outliers while
+        preserving meaningful intensity variations. Values outside this
+        range are clipped.
 
         Args:
             image: Input image array of any bit depth
+                  Must be a 2D numpy array with numeric dtype
 
         Returns:
-            8-bit image array
+            8-bit image array scaled to use full dynamic range [0, 255]
+
+        Raises:
+            ValueError: If input is not a 2D array or contains invalid values
+
+        Note:
+            This operation creates a new array and may temporarily double
+            memory usage for large images.
         """
         # Use percentiles to ignore outliers
         img_min = np.percentile(image, 1)
@@ -70,14 +91,33 @@ class ImagePreprocessor:
         return image_scaled
 
     def preprocess_frame(self, image: np.ndarray) -> Tuple[np.ndarray, dict]:
-        """
-        Preprocess a single image frame.
+        """Preprocess a single image frame through the complete pipeline.
+
+        Processing steps (in order):
+        1. Convert to 8-bit if needed (preserves relative intensities)
+        2. Apply intensity scaling based on min/max parameters
+        3. Apply Gaussian filter if enabled (reduces noise)
+        4. Apply median filter if enabled (removes speckle noise)
+        5. Apply CLAHE if enabled (enhances local contrast)
 
         Args:
             image: 2D numpy array of any bit depth
+                  Must contain valid numeric values
 
         Returns:
-            Tuple of (preprocessed image, preprocessing info dictionary)
+            Tuple containing:
+            - preprocessed image (np.ndarray): 8-bit processed image
+            - info (dict): Processing metadata including:
+                - original_dtype: Input image dtype
+                - original_range: (min, max) of input
+                - original_mean: Mean of input
+                - original_std: Std dev of input
+                - final_mean: Mean after processing
+                - final_std: Std dev after processing
+                - intensity_range: (min, max) intensity parameters used
+
+        Raises:
+            ValueError: If image is invalid or processing fails
         """
         # Store original statistics
         info = {
