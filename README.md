@@ -32,6 +32,21 @@ With the cellflow environment activated:
 ```bash
 pip install -e .
 ```
+## Starting napariCellFlow
+
+1. Open the Miniconda Prompt
+2. Activate the cellflow environment:
+   ```bash
+   conda activate cellflow
+   ```
+3. Start napari by typing:
+   ```bash
+   napari
+   ```
+4. In the napari window:
+   - Go to `Plugins > napariCellFlow`
+   - The plugin interface will appear in the right sidebar
+   - Select your input data and begin analysis using the available tabs
 
 
 ## Overview
