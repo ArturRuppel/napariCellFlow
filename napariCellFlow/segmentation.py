@@ -1,3 +1,11 @@
+"""
+Qt-integrated wrapper for Cellpose 3.0 cell segmentation.
+
+This module provides a Qt-friendly interface to Cellpose, with progress signals
+and parameter validation. Primarily designed for integration into Qt applications
+requiring cell segmentation capabilities.
+"""
+
 import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -14,7 +22,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SegmentationParameters:
-    """Parameters for Cellpose segmentation"""
+    """Parameters for Cellpose segmentation with validation.
+
+    This dataclass provides a validated parameter set for Cellpose 3.0,
+    ensuring all parameters are within valid ranges and logically consistent.
+    Implements validation logic that Cellpose doesn't provide natively.
+    """
     # Model parameters
     model_type: str = "cyto3"  # "cyto3", "nuclei", "custom"
     custom_model_path: Optional[str] = None
@@ -40,7 +53,14 @@ class SegmentationParameters:
     augment: bool = False  # Use augmentation for inference
 
     def validate(self):
-        """Validate parameter values"""
+        """Validate parameter values before passing to Cellpose.
+
+        Raises:
+            ValueError: If any parameter is invalid or inconsistent:
+                - Non-positive diameter with auto-compute disabled
+                - Flow/cell probability thresholds outside [0,1]
+                - Non-positive minimum size or batch size
+        """
         if self.diameter <= 0 and not self.compute_diameter:
             raise ValueError("Cell diameter must be positive or compute_diameter must be True")
         if not 0 <= self.flow_threshold <= 1:
@@ -55,14 +75,34 @@ class SegmentationParameters:
 
 
 class CellposeSignals(QObject):
-    """Separate class for Qt signals to avoid inheritance issues"""
+    """Qt signals for Cellpose segmentation events.
+
+    Provides Qt signals for tracking segmentation progress, completion,
+    and failures. Separated from main handler to avoid Qt inheritance issues.
+
+    Signals:
+        segmentation_completed: Emitted with (masks, metadata) on success
+        segmentation_failed: Emitted with error message on failure
+        progress_updated: Emitted with (percentage, message) during processing
+    """
     segmentation_completed = Signal(object, object)  # masks, metadata
     segmentation_failed = Signal(str)  # error message
     progress_updated = Signal(int, str)  # progress percentage, message
 
 
 class SegmentationHandler:
-    """Handles cell segmentation using Cellpose 3.0"""
+    """Qt-integrated handler for Cellpose cell segmentation.
+
+    Wraps Cellpose functionality with Qt signals for progress tracking
+    and parameter validation. Designed for integration into Qt applications
+    needing cell segmentation capabilities.
+
+    Key Features:
+        - Qt signal integration for progress/status updates
+        - Parameter validation
+        - Result metadata tracking
+        - GPU support management
+    """
     # Define signals
     segmentation_completed = Signal(np.ndarray, dict)  # masks, metadata
     segmentation_failed = Signal(str)  # error message
@@ -75,7 +115,19 @@ class SegmentationHandler:
         self.signals = CellposeSignals()
 
     def initialize_model(self, params: SegmentationParameters):
-        """Initialize the Cellpose model with given parameters"""
+        """Initialize Cellpose model with validated parameters.
+
+        Args:
+            params: Validated parameters for model initialization
+
+        Raises:
+            ValueError: If custom model selected without path
+            RuntimeError: If model initialization fails
+
+        Signals:
+            progress_updated: At start (0%) and completion (100%)
+            segmentation_failed: If initialization fails
+        """
         try:
             logger.info(f"Initializing Cellpose model: {params.model_type}")
             self.signals.progress_updated.emit(0, "Initializing model...")
@@ -109,7 +161,30 @@ class SegmentationHandler:
             raise
 
     def segment_frame(self, image: np.ndarray) -> Tuple[np.ndarray, dict]:
-        """Segment a single frame using Cellpose 3.0"""
+        """Segment cells in a single image frame with progress tracking.
+
+        Args:
+            image: Input image array (2D or 3D)
+
+        Returns:
+            Tuple of:
+                - Binary mask array (same shape as input)
+                - Results dict containing:
+                    - masks: Segmentation masks
+                    - flows: Cellpose flow components
+                    - styles: Cell style vectors
+                    - diameter: Used/computed diameter
+                    - parameters: Complete parameter set
+
+        Raises:
+            RuntimeError: If model not initialized
+            ValueError: If image format invalid
+
+        Signals:
+            progress_updated: During key processing steps
+            segmentation_completed: When processing succeeds
+            segmentation_failed: If processing fails
+        """
         if self.model is None:
             error_msg = "Model not initialized. Call initialize_model first."
             self.signals.segmentation_failed.emit(error_msg)
