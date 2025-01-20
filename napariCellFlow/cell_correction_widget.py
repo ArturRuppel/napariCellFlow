@@ -36,9 +36,9 @@ class CellCorrectionWidget(QWidget):
     """Widget for interactive cell correction in napari."""
 
     correction_made = Signal(np.ndarray)  # Emitted when masks are modified
-    LINE_THICKNESS = 2
-    START_POINT_RADIUS = 5
-    LINE_COLOR = 3
+    # LINE_THICKNESS = 2
+    # START_POINT_RADIUS = 5
+    # LINE_COLOR = 3
     MAX_UNDO_STEPS = 20
 
     def __init__(self, viewer: "napari.Viewer", data_manager: "DataManager",
@@ -155,10 +155,6 @@ class CellCorrectionWidget(QWidget):
                     self.start_point = coords
                     self.drawing_points = [coords]
 
-                    # Draw initial point
-                    preview = np.zeros_like(self.drawing_layer.data)
-                    cv2.circle(preview, (coords[1], coords[0]), 3, 1, -1)
-                    self.drawing_layer.data = preview
                 else:
                     self.drawing_points.append(coords)
                     if len(self.drawing_points) % 5 == 0:  # Batched updates
@@ -171,17 +167,26 @@ class CellCorrectionWidget(QWidget):
             logger.error(f"CellCorrection: Error in mouse drag: {e}", exc_info=True)
 
     def _update_drawing_preview(self):
-        """Fast drawing preview update."""
+        """Fast drawing preview update with dynamic thickness scaling."""
         if not self.drawing_points or len(self.drawing_points) < 2:
             return
 
         try:
-            # Just update existing layer - no need to check existence
             preview = np.zeros_like(self.drawing_layer.data)
-            points = np.array(self.drawing_points)[:, ::-1]  # Convert to x,y
-            cv2.polylines(preview, [points.astype(np.int32)], False, 1, 1)
 
-            # Start point is already drawn
+            # Calculate thickness based on image width
+            image_width = preview.shape[1]  # Get width of the image
+            thickness = max(1, int(image_width / 200))  # Linear scaling, minimum thickness of 1
+
+            # Draw the polyline with scaled thickness
+            points = np.array(self.drawing_points)[:, ::-1]  # Convert to x,y
+            cv2.polylines(preview, [points.astype(np.int32)], False, 1, thickness)
+
+            # Redraw the start point circle with scaled radius and thickness
+            if self.start_point is not None:
+                circle_radius = max(3, int(3 * image_width / 200))  # Scale circle radius similarly
+                cv2.circle(preview, (self.start_point[1], self.start_point[0]), circle_radius, 2, -1)
+
             self.drawing_layer.data = preview
 
         except Exception as e:

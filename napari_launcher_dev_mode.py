@@ -13,9 +13,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-###################################
-# check https://napari.org/0.5.4/plugins/advanced_topics/npe2_migration_guide.html
-###################################
+
 def setup_debug_environment():
     """Setup the debug environment and verify imports"""
     try:
