@@ -656,7 +656,16 @@ class CellCorrectionWidget(QWidget):
             self._updating = True
             current_frame = int(self.viewer.dims.point[0])
 
-            # Clear any active drawing
+            # Cancel any active drawing operation
+            if self.drawing_started:
+                self.drawing_started = False
+                self.drawing_points = []
+                self.start_point = None
+                self.is_drawing = False
+                self.ctrl_pressed = False  # Reset ctrl state as well
+                logger.debug("CellCorrection: Cancelled drawing due to frame change")
+
+            # Clear any drawing preview
             self._clear_drawing()
 
             # Update masks layer if needed
@@ -667,6 +676,9 @@ class CellCorrectionWidget(QWidget):
                     # Update visualization manager
                     if self.vis_manager.tracking_layer is not None:
                         self.vis_manager.tracking_layer.refresh()
+
+            # Update UI state
+            self._update_ui_state()
 
         except Exception as e:
             logger.error(f"Error during mouse wheel: {e}")
