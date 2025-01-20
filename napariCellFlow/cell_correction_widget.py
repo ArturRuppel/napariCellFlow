@@ -253,6 +253,7 @@ class CellCorrectionWidget(QWidget):
             pos = viewer.cursor.position
             coords = np.round(pos).astype(int)[-2:]
 
+            # Only handle right-click drawing when drawing mode is active
             if event.button == Qt.RightButton and self.is_drawing:
                 if not self.drawing_started:
                     # Fast initialization of preview layer and start circle
@@ -284,12 +285,12 @@ class CellCorrectionWidget(QWidget):
                     if len(self.drawing_points) % 5 == 0:  # Batched updates
                         self._update_drawing_preview()
 
-            elif event.button == Qt.LeftButton and self.is_drawing:
+            # Only handle left-click deletion when NOT in drawing mode
+            elif event.button == Qt.LeftButton and self.is_drawing and not self.drawing_started:
                 self._delete_cell_at_position(coords)
 
         except Exception as e:
             logger.error(f"CellCorrection: Error in mouse drag: {e}", exc_info=True)
-
     def _update_drawing_preview(self):
         """Fast drawing preview update with batched operations and dynamic scaling."""
         if not self.drawing_points or len(self.drawing_points) < 2:
