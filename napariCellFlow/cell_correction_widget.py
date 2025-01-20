@@ -124,6 +124,95 @@ class CellCorrectionWidget(QWidget):
         instructions.setMinimumHeight(120)  # Ensure enough vertical space
         layout.addWidget(instructions)
 
+    def _on_mouse_drag(self, viewer, event):
+        """Optimized mouse drag handler with fast initialization."""
+        try:
+            if self.masks_layer is None and self.vis_manager.tracking_layer is not None:
+                self.masks_layer = self.vis_manager.tracking_layer
+
+            if self.masks_layer is None:
+                return
+
+            pos = viewer.cursor.position
+            coords = np.round(pos).astype(int)[-2:]
+
+            if event.button == Qt.RightButton and self.is_drawing:
+                if not self.drawing_started:
+                    # Fast initialization - create preview layer only once when needed
+                    if self.drawing_layer is None:
+                        # Get existing layer shape but create single plane preview
+                        shape = self.masks_layer.data.shape
+                        base_shape = shape[1:] if len(shape) == 3 else shape
+                        preview = np.zeros(base_shape, dtype=np.uint8)
+                        self.drawing_layer = self.viewer.add_labels(
+                            preview,
+                            name='Drawing Preview',
+                            opacity=0.8,
+                            visible=True
+                        )
+
+                    self.drawing_started = True
+                    self.start_point = coords
+                    self.drawing_points = [coords]
+
+                    # Draw initial point
+                    preview = np.zeros_like(self.drawing_layer.data)
+                    cv2.circle(preview, (coords[1], coords[0]), 3, 1, -1)
+                    self.drawing_layer.data = preview
+                else:
+                    self.drawing_points.append(coords)
+                    if len(self.drawing_points) % 5 == 0:  # Batched updates
+                        self._update_drawing_preview()
+
+            elif event.button == Qt.LeftButton and self.is_drawing:
+                self._delete_cell_at_position(coords)
+
+        except Exception as e:
+            logger.error(f"CellCorrection: Error in mouse drag: {e}", exc_info=True)
+
+    def _update_drawing_preview(self):
+        """Fast drawing preview update."""
+        if not self.drawing_points or len(self.drawing_points) < 2:
+            return
+
+        try:
+            # Just update existing layer - no need to check existence
+            preview = np.zeros_like(self.drawing_layer.data)
+            points = np.array(self.drawing_points)[:, ::-1]  # Convert to x,y
+            cv2.polylines(preview, [points.astype(np.int32)], False, 1, 1)
+
+            # Start point is already drawn
+            self.drawing_layer.data = preview
+
+        except Exception as e:
+            logger.error(f"Error in drawing preview: {e}")
+
+    def _clear_drawing(self):
+        """Fast drawing cleanup."""
+        if self.drawing_layer is not None:
+            self.viewer.layers.remove(self.drawing_layer)
+            self.drawing_layer = None
+
+        self.drawing_points = []
+        self.drawing_started = False
+        self.start_point = None
+
+    def _on_mouse_move(self, viewer, event):
+        """Simplified mouse movement handler with minimal computation."""
+        if not self.is_drawing or not self.drawing_started:
+            return
+
+        coords = np.round(viewer.cursor.position).astype(int)[-2:]  # Just get y,x
+        self.drawing_points.append(coords)
+
+        # Quick closure check
+        if len(self.drawing_points) > self.MIN_DRAWING_POINTS:
+            if np.linalg.norm(coords - self.start_point) < self.CLOSURE_THRESHOLD:
+                self._finish_drawing()
+                return
+
+        self._update_drawing_preview()  # Now batched
+
     def _update_ui_state(self):
         """Update UI elements based on current state"""
         try:
@@ -150,33 +239,6 @@ class CellCorrectionWidget(QWidget):
         self.viewer.mouse_drag_callbacks.append(self._on_mouse_drag)
         self.viewer.mouse_move_callbacks.append(self._on_mouse_move)
         self.viewer.mouse_wheel_callbacks.append(self._on_mouse_wheel)
-
-    def _on_mouse_drag(self, viewer, event):
-        """Handle mouse drag events"""
-        try:
-            if self.masks_layer is None and self.vis_manager.tracking_layer is not None:
-                self.masks_layer = self.vis_manager.tracking_layer
-
-            if self.masks_layer is None:
-                return
-
-            pos = viewer.cursor.position
-            coords = np.round(pos).astype(int)[-2:]
-
-            if event.button == Qt.RightButton and self.is_drawing:
-                if not self.drawing_started:
-                    self.drawing_started = True
-                    self.start_point = coords
-                    self.drawing_points = [coords]
-                    self._update_drawing_preview()
-                else:
-                    self.drawing_points.append(coords)
-                    self._update_drawing_preview()
-            elif event.button == Qt.LeftButton and self.is_drawing:
-                self._delete_cell_at_position(coords)
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error in mouse drag: {e}", exc_info=True)
 
     def _update_drawing_state(self):
         """Update drawing state with proper synchronization."""
