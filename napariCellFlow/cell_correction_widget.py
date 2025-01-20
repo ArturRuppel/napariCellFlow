@@ -512,7 +512,6 @@ class CellCorrectionWidget(QWidget):
             )
 
             self.undo_stack.append(action)
-            self.undo_btn.setEnabled(True)
             logger.debug(f"Stored undo state: {description} ({action_type})")
 
         except Exception as e:
@@ -554,8 +553,6 @@ class CellCorrectionWidget(QWidget):
             self.status_label.setText(f"Undid: {action.description}")
             logger.info(f"Undid action: {action.description} ({action.action_type})")
 
-            # Update undo button state
-            self.undo_btn.setEnabled(len(self.undo_stack) > 0)
 
         except Exception as e:
             logger.error(f"Error during undo: {e}")
@@ -591,7 +588,6 @@ class CellCorrectionWidget(QWidget):
 
             # Clear undo stack when loading new data
             self.undo_stack.clear()
-            self.undo_btn.setEnabled(False)
 
         except Exception as e:
             logger.error(f"Failed to initialize with external data: {e}")
