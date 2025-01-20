@@ -36,10 +36,9 @@ class CellCorrectionWidget(QWidget):
     """Widget for interactive cell correction in napari."""
 
     correction_made = Signal(np.ndarray)  # Emitted when masks are modified
-    # LINE_THICKNESS = 2
-    # START_POINT_RADIUS = 5
-    # LINE_COLOR = 3
     MAX_UNDO_STEPS = 20
+    CLOSURE_THRESHOLD = 5
+    MIN_DRAWING_POINTS = 10
 
     def __init__(self, viewer: "napari.Viewer", data_manager: "DataManager",
                  visualization_manager: "VisualizationManager", parent: QWidget = None):
@@ -86,8 +85,6 @@ class CellCorrectionWidget(QWidget):
         self.selected_cell = None
         self.drawing_started = False
         self.start_point = None
-        self.CLOSURE_THRESHOLD = 10
-        self.MIN_DRAWING_POINTS = 20
         self.ctrl_pressed = False
         self.toggle_state = False
 
@@ -203,21 +200,31 @@ class CellCorrectionWidget(QWidget):
         self.start_point = None
 
     def _on_mouse_move(self, viewer, event):
-        """Simplified mouse movement handler with minimal computation."""
+        """Mouse movement handler using circle radius as closure threshold."""
         if not self.is_drawing or not self.drawing_started:
             return
 
         coords = np.round(viewer.cursor.position).astype(int)[-2:]  # Just get y,x
         self.drawing_points.append(coords)
 
-        # Quick closure check
-        if len(self.drawing_points) > self.MIN_DRAWING_POINTS:
-            if np.linalg.norm(coords - self.start_point) < self.CLOSURE_THRESHOLD:
-                self._finish_drawing()
-                return
+        # Get current image width and calculate circle radius (same as in _update_drawing_preview)
+        if self.masks_layer is not None and self.masks_layer.data is not None:
+            if len(self.masks_layer.data.shape) == 3:
+                image_width = self.masks_layer.data.shape[2]  # For 3D data
+            else:
+                image_width = self.masks_layer.data.shape[1]  # For 2D data
 
-        self._update_drawing_preview()  # Now batched
+            # Use the same circle radius calculation as in preview drawing
+            circle_radius = max(3, int(3 * image_width / 200))
 
+            # Only check for closure after minimum points to prevent accidental early closure
+            if len(self.drawing_points) > self.MIN_DRAWING_POINTS:
+                # Use circle radius as the closure threshold
+                if np.linalg.norm(coords - self.start_point) < circle_radius:
+                    self._finish_drawing()
+                    return
+
+        self._update_drawing_preview()
     def _update_ui_state(self):
         """Update UI elements based on current state"""
         try:
