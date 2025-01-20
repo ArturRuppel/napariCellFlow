@@ -120,6 +120,127 @@ class CellCorrectionWidget(QWidget):
         instructions.setMinimumHeight(120)  # Ensure enough vertical space
         layout.addWidget(instructions)
 
+    def _on_mouse_move(self, viewer, event):
+        """Optimized mouse movement handler with faster closing detection."""
+        if not self.is_drawing or not self.drawing_started:
+            return
+
+        coords = np.round(viewer.cursor.position).astype(int)[-2:]
+
+        # Early exit if not enough points for closing
+        if len(self.drawing_points) < self.MIN_DRAWING_POINTS:
+            self.drawing_points.append(coords)
+            if len(self.drawing_points) % 5 == 0:
+                self._update_drawing_preview()
+            return
+
+        # Fast distance check to start point using numpy
+        distance_to_start = np.linalg.norm(coords - self.start_point)
+
+        # Calculate closure threshold based on image width (same as in preview)
+        image_width = (self.masks_layer.data.shape[2]
+                       if len(self.masks_layer.data.shape) == 3
+                       else self.masks_layer.data.shape[1])
+        closure_radius = max(3, int(3 * image_width / 200))
+
+        # Check for closure
+        if distance_to_start < closure_radius:
+            # Quick validation of shape before closing
+            if len(self.drawing_points) >= self.MIN_DRAWING_POINTS:
+                # Add final point to close the shape cleanly
+                self.drawing_points.append(self.start_point)
+                self._finish_drawing()
+                return
+
+        # Point throttling for performance
+        if self.drawing_points:
+            last_point = self.drawing_points[-1]
+            min_distance = 2  # Minimum pixels between points
+            if np.linalg.norm(coords - last_point) >= min_distance:
+                self.drawing_points.append(coords)
+                if len(self.drawing_points) % 5 == 0:
+                    self._update_drawing_preview()
+
+    def _finish_drawing(self):
+        """Optimized drawing completion."""
+        if not self.drawing_points or len(self.drawing_points) < 3:
+            logger.debug("CellCorrection: Not enough points to complete drawing")
+            self._clear_drawing()
+            return
+
+        if self._updating:
+            return
+
+        try:
+            self._updating = True
+            current_frame = int(self.viewer.dims.point[0])
+
+            if not self.vis_manager.tracking_layer:
+                raise ValueError("No tracking layer available")
+
+            # Get current state efficiently
+            prev_state = self.vis_manager.tracking_layer.data.copy()
+            if prev_state.ndim == 2:
+                prev_state = prev_state[np.newaxis, ...]
+
+            # Fast max calculation for next cell ID
+            current_max = int(np.max(prev_state)) if prev_state.size > 0 else 0
+            self.next_cell_id = max(self.next_cell_id, current_max + 1)
+
+            # Create undo action
+            action = UndoAction(
+                action_type=ActionType.DRAW,
+                frame=current_frame,
+                previous_state=prev_state,
+                description=f"Draw new cell {self.next_cell_id}",
+                affected_cell_ids={self.next_cell_id}
+            )
+            self.undo_stack.append(action)
+
+            # Efficient shape getting
+            frame_shape = (prev_state.shape[1:] if prev_state.ndim == 3
+                           else prev_state.shape)
+
+            # Create cell mask with optimized array operations
+            new_cell_mask = np.zeros(frame_shape, dtype=np.uint8)
+            points = np.array(self.drawing_points)
+            points = np.clip(points, 0, np.array(frame_shape) - 1)
+            cv2.fillPoly(new_cell_mask, [points[:, ::-1].astype(np.int32)], 1)
+
+            # Get current frame data efficiently
+            if prev_state.ndim == 3:
+                current_frame_data = prev_state[current_frame].copy()
+            else:
+                current_frame_data = prev_state.copy()
+
+            # Optimized mask updates using boolean operations
+            empty_mask = (current_frame_data == 0)
+            add_mask = np.logical_and(new_cell_mask > 0, empty_mask)
+            current_frame_data[add_mask] = self.next_cell_id
+
+            # Update data and visualization
+            if prev_state.ndim == 3:
+                self.data_manager.segmentation_data = (current_frame_data, current_frame)
+            else:
+                self.data_manager.segmentation_data = current_frame_data
+
+            self.vis_manager.update_tracking_visualization(
+                (current_frame_data, current_frame) if prev_state.ndim == 3
+                else current_frame_data
+            )
+
+            self.status_label.setText(f"Added new cell {self.next_cell_id}")
+            self.next_cell_id += 1
+
+        except Exception as e:
+            logger.error(f"CellCorrection: Error finishing drawing: {e}")
+            raise
+        finally:
+            self._updating = False
+            self.drawing_started = False
+            self.start_point = None
+            self._clear_drawing()
+
     def _on_mouse_drag(self, viewer, event):
         """Optimized mouse drag handler with fast initialization."""
         try:
@@ -134,9 +255,8 @@ class CellCorrectionWidget(QWidget):
 
             if event.button == Qt.RightButton and self.is_drawing:
                 if not self.drawing_started:
-                    # Fast initialization - create preview layer only once when needed
+                    # Fast initialization of preview layer and start circle
                     if self.drawing_layer is None:
-                        # Get existing layer shape but create single plane preview
                         shape = self.masks_layer.data.shape
                         base_shape = shape[1:] if len(shape) == 3 else shape
                         preview = np.zeros(base_shape, dtype=np.uint8)
@@ -147,10 +267,18 @@ class CellCorrectionWidget(QWidget):
                             visible=True
                         )
 
+                    # Draw initial circle immediately
+                    preview = np.zeros_like(self.drawing_layer.data)
+                    image_width = preview.shape[1]
+                    circle_radius = max(3, int(3 * image_width / 200))
+                    cv2.circle(preview,
+                               (coords[1], coords[0]),
+                               circle_radius, 2, -1)
+                    self.drawing_layer.data = preview
+
                     self.drawing_started = True
                     self.start_point = coords
                     self.drawing_points = [coords]
-
                 else:
                     self.drawing_points.append(coords)
                     if len(self.drawing_points) % 5 == 0:  # Batched updates
@@ -163,25 +291,45 @@ class CellCorrectionWidget(QWidget):
             logger.error(f"CellCorrection: Error in mouse drag: {e}", exc_info=True)
 
     def _update_drawing_preview(self):
-        """Fast drawing preview update with dynamic thickness scaling."""
+        """Fast drawing preview update with batched operations and dynamic scaling."""
         if not self.drawing_points or len(self.drawing_points) < 2:
             return
 
         try:
-            preview = np.zeros_like(self.drawing_layer.data)
+            # Create preview array only when needed
+            if self.drawing_layer is None:
+                shape = self.masks_layer.data.shape
+                base_shape = shape[1:] if len(shape) == 3 else shape
+                preview = np.zeros(base_shape, dtype=np.uint8)
+                self.drawing_layer = self.viewer.add_labels(
+                    preview,
+                    name='Drawing Preview',
+                    opacity=0.8,
+                    visible=True
+                )
+            else:
+                preview = np.zeros_like(self.drawing_layer.data)
 
-            # Calculate thickness based on image width
-            image_width = preview.shape[1]  # Get width of the image
-            thickness = max(1, int(image_width / 200))  # Linear scaling, minimum thickness of 1
+            # Calculate scaling based on image width
+            image_width = preview.shape[1]
+            thickness = max(1, int(image_width / 200))  # Keep dynamic thickness scaling
+            circle_radius = max(3, int(3 * image_width / 200))  # Keep dynamic circle radius
 
-            # Draw the polyline with scaled thickness
-            points = np.array(self.drawing_points)[:, ::-1]  # Convert to x,y
+            # Batch process points for efficiency
+            points = np.array(self.drawing_points)[:, ::-1]  # Single array conversion
+
+            # Draw only last N points for efficiency on very long paths
+            if len(points) > 200:
+                points = points[-200:]
+
+            # Draw polyline with scaled thickness
             cv2.polylines(preview, [points.astype(np.int32)], False, 1, thickness)
 
-            # Redraw the start point circle with scaled radius and thickness
+            # Draw start point circle with scaled radius
             if self.start_point is not None:
-                circle_radius = max(3, int(3 * image_width / 200))  # Scale circle radius similarly
-                cv2.circle(preview, (self.start_point[1], self.start_point[0]), circle_radius, 2, -1)
+                cv2.circle(preview,
+                           (self.start_point[1], self.start_point[0]),
+                           circle_radius, 2, -1)
 
             self.drawing_layer.data = preview
 
@@ -198,32 +346,6 @@ class CellCorrectionWidget(QWidget):
         self.drawing_started = False
         self.start_point = None
 
-    def _on_mouse_move(self, viewer, event):
-        """Mouse movement handler using circle radius as closure threshold."""
-        if not self.is_drawing or not self.drawing_started:
-            return
-
-        coords = np.round(viewer.cursor.position).astype(int)[-2:]  # Just get y,x
-        self.drawing_points.append(coords)
-
-        # Get current image width and calculate circle radius (same as in _update_drawing_preview)
-        if self.masks_layer is not None and self.masks_layer.data is not None:
-            if len(self.masks_layer.data.shape) == 3:
-                image_width = self.masks_layer.data.shape[2]  # For 3D data
-            else:
-                image_width = self.masks_layer.data.shape[1]  # For 2D data
-
-            # Use the same circle radius calculation as in preview drawing
-            circle_radius = max(3, int(3 * image_width / 200))
-
-            # Only check for closure after minimum points to prevent accidental early closure
-            if len(self.drawing_points) > self.MIN_DRAWING_POINTS:
-                # Use circle radius as the closure threshold
-                if np.linalg.norm(coords - self.start_point) < circle_radius:
-                    self._finish_drawing()
-                    return
-
-        self._update_drawing_preview()
     def _update_ui_state(self):
         """Update UI elements based on current state"""
         try:
@@ -343,86 +465,6 @@ class CellCorrectionWidget(QWidget):
             logger.error(f"CellCorrection: Error handling Ctrl key: {e}")
             return False
 
-    def _finish_drawing(self):
-        """Complete the cell drawing and save it"""
-        if not self.drawing_points or len(self.drawing_points) < 3:
-            logger.debug("CellCorrection: Not enough points to complete drawing")
-            self._clear_drawing()
-            return
-
-        if self._updating:
-            return
-
-        try:
-            self._updating = True
-            current_frame = int(self.viewer.dims.point[0])
-
-            if not self.vis_manager.tracking_layer:
-                raise ValueError("No tracking layer available")
-
-            # Get current state BEFORE any changes for undo
-            prev_state = self.vis_manager.tracking_layer.data.copy()
-            if prev_state.ndim == 2:
-                prev_state = prev_state[np.newaxis, ...]
-
-            # Update next_cell_id to be one more than the current maximum
-            current_max = int(np.max(prev_state)) if prev_state.size > 0 else 0
-            self.next_cell_id = max(self.next_cell_id, current_max + 1)
-
-            # Create and store undo action
-            action = UndoAction(
-                action_type=ActionType.DRAW,
-                frame=current_frame,
-                previous_state=prev_state,
-                description=f"Draw new cell {self.next_cell_id}",
-                affected_cell_ids={self.next_cell_id}
-            )
-            self.undo_stack.append(action)
-
-            # Get current frame shape
-            frame_shape = (self.vis_manager.tracking_layer.data.shape[1:]
-                           if len(self.vis_manager.tracking_layer.data.shape) == 3
-                           else self.vis_manager.tracking_layer.data.shape)
-
-            # Create new cell mask
-            new_cell_mask = self._create_cell_mask(frame_shape)
-
-            # Get current frame data
-            if len(self.vis_manager.tracking_layer.data.shape) == 3:
-                current_frame_data = self.vis_manager.tracking_layer.data[current_frame].copy()
-            else:
-                current_frame_data = self.vis_manager.tracking_layer.data.copy()
-
-            # Update the mask
-            empty_mask = (current_frame_data == 0)
-            add_mask = np.logical_and(new_cell_mask > 0, empty_mask)
-            current_frame_data[add_mask] = self.next_cell_id
-
-            # Update data manager and visualization
-            if len(self.vis_manager.tracking_layer.data.shape) == 3:
-                self.data_manager.segmentation_data = (current_frame_data, current_frame)
-            else:
-                self.data_manager.segmentation_data = current_frame_data
-
-            # Update visualization
-            self.vis_manager.update_tracking_visualization(
-                (current_frame_data, current_frame) if len(self.vis_manager.tracking_layer.data.shape) == 3
-                else current_frame_data
-            )
-
-            self.status_label.setText(f"Added new cell {self.next_cell_id}")
-
-            # Increment next_cell_id after successful creation
-            self.next_cell_id += 1
-
-        except Exception as e:
-            logger.error(f"CellCorrection: Error finishing drawing: {e}")
-            raise
-        finally:
-            self._updating = False
-            self.drawing_started = False
-            self.start_point = None
-            self._clear_drawing()
     def _setup_shortcuts(self):
         """Set up keyboard shortcuts"""
         try:
