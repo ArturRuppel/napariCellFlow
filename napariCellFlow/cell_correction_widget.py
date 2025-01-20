@@ -37,7 +37,6 @@ class CellCorrectionWidget(QWidget):
 
     correction_made = Signal(np.ndarray)  # Emitted when masks are modified
     MAX_UNDO_STEPS = 20
-    CLOSURE_THRESHOLD = 5
     MIN_DRAWING_POINTS = 10
 
     def __init__(self, viewer: "napari.Viewer", data_manager: "DataManager",
