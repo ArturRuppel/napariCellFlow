@@ -1,5 +1,6 @@
 import logging
 import pickle
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Union, Dict, List
 from threading import Lock
@@ -8,9 +9,121 @@ import tifffile
 from .debug_logging import log_operation
 
 logger = logging.getLogger(__name__)
-from napariCellFlow.structure import EdgeAnalysisResults, EdgeAnalysisParams
+from napariCellFlow.structure import EdgeAnalysisResults, EdgeAnalysisParams, IntercalationEvent, EdgeData
+
+import json
+import numpy as np
+from pathlib import Path
+from typing import Dict, Any
 
 
+class DataSerializer:
+    """Simple serialization using JSON for maximum compatibility"""
+
+    @staticmethod
+    def _convert_to_serializable(obj):
+        """Convert an object to a JSON-serializable format"""
+        # Handle numpy numeric types
+        if np.issubdtype(type(obj), np.integer):
+            return int(obj)
+        elif np.issubdtype(type(obj), np.floating):
+            return float(obj)
+        elif isinstance(obj, set):
+            return list(obj)
+        elif isinstance(obj, (datetime, np.datetime64)):
+            return str(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif hasattr(obj, '__dict__'):
+            # Handle class instances by converting to dict
+            return {k: DataSerializer._convert_to_serializable(v)
+                    for k, v in obj.__dict__.items()}
+        elif isinstance(obj, dict):
+            return {k: DataSerializer._convert_to_serializable(v)
+                    for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [DataSerializer._convert_to_serializable(x) for x in obj]
+        return obj
+
+    @staticmethod
+    def serialize_results(results: 'EdgeAnalysisResults', file_path: Path) -> None:
+        """Convert analysis results to simple JSON-compatible dictionary"""
+        if not str(file_path).endswith('.json'):
+            file_path = file_path.with_suffix('.json')
+
+        # Convert metadata with special handling for EdgeAnalysisParams
+        metadata = {}
+        for key, value in results.metadata.items():
+            if key == 'parameters':
+                # Convert EdgeAnalysisParams to dictionary
+                metadata[key] = {
+                    'dilation_radius': int(value.dilation_radius),  # Ensure integer
+                    'min_overlap_pixels': int(value.min_overlap_pixels),  # Ensure integer
+                    'min_edge_length': float(value.min_edge_length),  # Ensure float
+                    'filter_isolated': bool(value.filter_isolated),  # Ensure boolean
+                    'temporal_window': int(value.temporal_window),  # Ensure integer
+                    'min_contact_frames': int(value.min_contact_frames)  # Ensure integer
+                }
+            else:
+                metadata[key] = DataSerializer._convert_to_serializable(value)
+
+        # Prepare the main data structure
+        data = {
+            'metadata': metadata,
+            'edges': {}
+        }
+
+        # Convert each edge to simple dict
+        for edge_id, edge in results.edges.items():
+            data['edges'][str(edge_id)] = {
+                'frames': [int(f) for f in edge.frames],  # Ensure integers
+                'cell_pairs': [[int(c) for c in pair] for pair in edge.cell_pairs],  # Ensure integers
+                'lengths': [float(l) for l in edge.lengths],  # Ensure floats
+                'coordinates': [coords.tolist() for coords in edge.coordinates],
+                'intercalations': [
+                    {
+                        'frame': int(event.frame),  # Ensure integer
+                        'losing_cells': [int(c) for c in event.losing_cells],  # Ensure integers
+                        'gaining_cells': [int(c) for c in event.gaining_cells],  # Ensure integers
+                        'coordinates': event.coordinates.tolist()
+                    }
+                    for event in edge.intercalations
+                ]
+            }
+
+        # Save segmentation data separately as numpy array if present
+        if results.segmentation_data is not None:
+            np.save(
+                file_path.with_suffix('.seg.npy'),
+                results.segmentation_data,
+                allow_pickle=False
+            )
+
+        # Save main data as JSON
+        with open(file_path, 'w') as f:
+            json.dump(data, f, indent=2)
+
+    @staticmethod
+    def deserialize_results(file_path: Path) -> Dict[str, Any]:
+        """Load data as simple dictionary - no special classes needed"""
+        file_path = Path(file_path)
+
+        # Load main JSON data
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+
+        # Load segmentation data if it exists
+        seg_file = file_path.with_suffix('.seg.npy')
+        if seg_file.exists():
+            data['segmentation_data'] = np.load(seg_file, allow_pickle=False)
+
+        # Convert lists back to numpy arrays where needed
+        for edge_id, edge in data['edges'].items():
+            edge['coordinates'] = [np.array(coords) for coords in edge['coordinates']]
+            for event in edge['intercalations']:
+                event['coordinates'] = np.array(event['coordinates'])
+
+        return data
 class DataManager:
     """Manages data across different components of the application with robust frame handling."""
 
@@ -25,6 +138,7 @@ class DataManager:
         self._frame_states = {}  # Track state of individual frames
         self._initialized = False
         self.last_directory = None
+        self.data_serializer = DataSerializer()
 
     @property
     def last_directory(self) -> Optional[Path]:
@@ -84,9 +198,11 @@ class DataManager:
 
         self.analysis_results = results
 
+    # In data_manager.py
+
     def save_analysis_results(self, file_path: Union[str, Path]) -> None:
         """
-        Save the current analysis results to a pickle file.
+        Save the current analysis results to JSON format.
 
         Args:
             file_path: Path to save the results to
@@ -99,10 +215,11 @@ class DataManager:
             raise ValueError("No analysis results to save")
 
         file_path = Path(file_path)
+        if not str(file_path).endswith('.json'):
+            file_path = file_path.with_suffix('.json')
 
         try:
-            with file_path.open('wb') as f:
-                pickle.dump(self._analysis_results, f)
+            self.data_serializer.serialize_results(self._analysis_results, file_path)
             logger.info(f"Analysis results saved to {file_path}")
             self.last_directory = Path(file_path).parent
 
@@ -112,7 +229,7 @@ class DataManager:
 
     def load_analysis_results(self, file_path: Union[str, Path]) -> None:
         """
-        Load analysis results from a pickle file.
+        Load analysis results from JSON format.
 
         Args:
             file_path: Path to load the results from
@@ -128,16 +245,59 @@ class DataManager:
             raise ValueError(f"File not found: {file_path}")
 
         try:
-            with file_path.open('rb') as f:
-                loaded_data = pickle.load(f)
+            data = self.data_serializer.deserialize_results(file_path)
 
-            # Validate loaded data
-            if not isinstance(loaded_data, EdgeAnalysisResults):
-                raise ValueError(
-                    f"Invalid file format: expected EdgeAnalysisResults, got {type(loaded_data)}"
+            # Create EdgeAnalysisParams from loaded data
+            params = EdgeAnalysisParams(
+                dilation_radius=data['metadata']['parameters']['dilation_radius'],
+                min_overlap_pixels=data['metadata']['parameters']['min_overlap_pixels'],
+                min_edge_length=data['metadata']['parameters']['min_edge_length'],
+                filter_isolated=data['metadata']['parameters']['filter_isolated'],
+                temporal_window=data['metadata']['parameters']['temporal_window'],
+                min_contact_frames=data['metadata']['parameters']['min_contact_frames']
+            )
+
+            # Create new EdgeAnalysisResults
+            results = EdgeAnalysisResults(params)
+
+            # Restore metadata
+            for key, value in data['metadata'].items():
+                if key != 'parameters':  # Skip parameters as we handle them separately
+                    results.metadata[key] = value
+            results.metadata['parameters'] = params  # Add back the params object
+
+            # Restore edges
+            for edge_id_str, edge_data in data['edges'].items():
+                edge_id = int(edge_id_str)
+
+                # Create intercalation events
+                intercalations = []
+                for event_data in edge_data['intercalations']:
+                    event = IntercalationEvent(
+                        frame=event_data['frame'],
+                        losing_cells=tuple(event_data['losing_cells']),
+                        gaining_cells=tuple(event_data['gaining_cells']),
+                        coordinates=np.array(event_data['coordinates'])
+                    )
+                    intercalations.append(event)
+
+                # Create edge data
+                edge = EdgeData(
+                    edge_id=edge_id,
+                    frames=edge_data['frames'],
+                    cell_pairs=[tuple(pair) for pair in edge_data['cell_pairs']],
+                    lengths=edge_data['lengths'],
+                    coordinates=[np.array(coords) for coords in edge_data['coordinates']],
+                    intercalations=intercalations
                 )
 
-            self._analysis_results = loaded_data
+                results.add_edge(edge)
+
+            # Restore segmentation data if present
+            if 'segmentation_data' in data:
+                results.set_segmentation_data(data['segmentation_data'])
+
+            self._analysis_results = results
             logger.info(f"Analysis results loaded from {file_path}")
 
         except Exception as e:

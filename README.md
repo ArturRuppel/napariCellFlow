@@ -3,11 +3,6 @@ Welcome to napariCellFlow! This tool helps you analyze cellular dynamics in micr
 
 ## Installation
 
-### Prerequisites
-- Windows operating system
-- No administrator rights required
-- Internet connection for downloading installers
-
 ### Step 1: Install Miniconda
 1. Download the latest Miniconda installer for Windows (64-bit) from https://docs.conda.io/en/latest/miniconda.html
 2. Run the installer with these settings:

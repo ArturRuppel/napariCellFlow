@@ -304,7 +304,7 @@ class EdgeAnalyzer:
                 trajectory = edge_trajectories[traj_id]
 
                 # Determine sign based on intercalation events
-                sign = 1
+                sign = -1
                 for event in trajectory.intercalations:
                     if frame > event.frame:
                         sign *= -1

@@ -728,8 +728,38 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 component=self.__class__.__name__
             )
 
+    def _get_save_path(self) -> Optional[Path]:
+        """Show file dialog for saving results"""
+        dialog = QFileDialog(self)
+        dialog.setWindowTitle("Save Edge Analysis Results")
+        dialog.setNameFilter("JSON files (*.json)")
+        dialog.setAcceptMode(QFileDialog.AcceptSave)
+        dialog.setFileMode(QFileDialog.AnyFile)
+
+        if self.data_manager.last_directory:
+            dialog.setDirectory(str(self.data_manager.last_directory))
+
+        if dialog.exec_():
+            return Path(dialog.selectedFiles()[0])
+        return None
+
+    def _get_load_path(self) -> Optional[Path]:
+        """Show file dialog for loading results"""
+        dialog = QFileDialog(self)
+        dialog.setWindowTitle("Load Edge Analysis Results")
+        dialog.setNameFilter("JSON files (*.json)")
+        dialog.setAcceptMode(QFileDialog.AcceptOpen)
+        dialog.setFileMode(QFileDialog.ExistingFile)
+
+        if self.data_manager.last_directory:
+            dialog.setDirectory(str(self.data_manager.last_directory))
+
+        if dialog.exec_():
+            return Path(dialog.selectedFiles()[0])
+        return None
+
     def save_results(self):
-        """Save the current analysis results"""
+        """Save the current analysis results as both JSON and CSV"""
         try:
             # Validate we have results to save
             if self._current_results is None:
@@ -740,7 +770,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 )
                 return
 
-            # Get save path
+            # Get save path for JSON
             file_path = self._get_save_path()
             if file_path is None:
                 return
@@ -748,26 +778,31 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             self._set_controls_enabled(False)
             self._update_status("Saving analysis results...", 20)
 
-            # Ensure file has .pkl extension
-            if file_path.suffix.lower() != '.pkl':
-                file_path = file_path.with_suffix('.pkl')
+            # Ensure file has .json extension
+            if file_path.suffix.lower() != '.json':
+                file_path = file_path.with_suffix('.json')
 
             # Ensure segmentation data is included in results
             if self.segmentation_data is not None and self._current_results.get_segmentation_data() is None:
                 self._current_results.set_segmentation_data(self.segmentation_data)
 
-            # Update data manager and save
+            # Update data manager and save JSON
             self.data_manager.analysis_results = self._current_results
             self.data_manager.save_analysis_results(file_path)
 
+            self._update_status("Saving CSV data...", 60)
+
+            # Save CSV file with simplified edge data
+            csv_path = file_path.with_suffix('.csv')
+            self._save_csv_data(csv_path)
+
             self._update_status(
-                f"Results saved to {file_path.name} "
+                f"Results saved to {file_path.name} and {csv_path.name} "
                 f"({len(self._current_results.edges)} edges)",
                 100
             )
 
         except Exception as e:
-            # Use base widget's error handling
             self._handle_error(ProcessingError(
                 message="Failed to save results",
                 details=str(e),
@@ -775,6 +810,55 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
             ))
         finally:
             self._set_controls_enabled(True)
+
+    def _save_csv_data(self, csv_path: Path):
+        """Save simplified edge data to CSV file"""
+        import csv
+
+        # Prepare CSV data
+        csv_data = []
+
+        # Add header row
+        header = ['edge_id', 'frame', 'cell_id_1', 'cell_id_2', 'length_um', 'signed_length_um', 'has_intercalation']
+        csv_data.append(header)
+
+        # Process each edge
+        for edge_id, edge in self._current_results.edges.items():
+            for frame_idx, frame in enumerate(edge.frames):
+                # Get basic edge information
+                cell_pair = edge.cell_pairs[frame_idx] if frame_idx < len(edge.cell_pairs) else [None, None]
+                length = edge.lengths[frame_idx] if frame_idx < len(edge.lengths) else 0.0
+
+                # Determine if this frame has an intercalation event
+                has_intercalation = False
+                signed_length = length
+
+                # Check if there are intercalation events for this edge
+                if hasattr(edge, 'intercalations') and edge.intercalations:
+                    # Check if any intercalation occurs at this frame
+                    for intercalation in edge.intercalations:
+                        if hasattr(intercalation, 'frame') and intercalation.frame == frame:
+                            has_intercalation = True
+                            # Make length negative to indicate intercalation
+                            signed_length = -abs(length)
+                            break
+
+                # Add row to CSV data
+                row = [
+                    str(edge_id),
+                    int(frame),
+                    int(cell_pair[0]) if cell_pair[0] is not None else '',
+                    int(cell_pair[1]) if cell_pair[1] is not None else '',
+                    float(length),
+                    float(signed_length),
+                    bool(has_intercalation)
+                ]
+                csv_data.append(row)
+
+        # Write CSV file
+        with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerows(csv_data)
 
     def load_results(self):
         """Load previously saved analysis results"""
@@ -908,36 +992,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 boundaries_by_frame[frame].append(boundary)
 
         return boundaries_by_frame
-
-    def _get_save_path(self) -> Optional[Path]:
-        """Show file dialog for saving results"""
-        dialog = QFileDialog(self)
-        dialog.setWindowTitle("Save Edge Analysis Results")
-        dialog.setNameFilter("Pickle files (*.pkl)")
-        dialog.setAcceptMode(QFileDialog.AcceptSave)
-        dialog.setFileMode(QFileDialog.AnyFile)
-
-        if self.data_manager.last_directory:
-            dialog.setDirectory(str(self.data_manager.last_directory))
-
-        if dialog.exec_():
-            return Path(dialog.selectedFiles()[0])
-        return None
-
-    def _get_load_path(self) -> Optional[Path]:
-        """Show file dialog for loading results"""
-        dialog = QFileDialog(self)
-        dialog.setWindowTitle("Load Edge Analysis Results")
-        dialog.setNameFilter("Pickle files (*.pkl)")
-        dialog.setAcceptMode(QFileDialog.AcceptOpen)
-        dialog.setFileMode(QFileDialog.ExistingFile)
-
-        if self.data_manager.last_directory:
-            dialog.setDirectory(str(self.data_manager.last_directory))
-
-        if dialog.exec_():
-            return Path(dialog.selectedFiles()[0])
-        return None
 
     def cleanup(self):
         """Clean up resources"""
