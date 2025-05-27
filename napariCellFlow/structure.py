@@ -163,13 +163,14 @@ class IntercalationEvent:
 
 @dataclass
 class EdgeData:
-    """Comprehensive edge tracking data"""
+    """Container for edge tracking data through time with proper units."""
     edge_id: int
     frames: List[int]
     cell_pairs: List[Tuple[int, int]]
-    lengths: List[float]
+    lengths: List[float]  # Now in micrometers after conversion
     coordinates: List[np.ndarray]
-    intercalations: List[IntercalationEvent] = field(default_factory=list)
+    time_points: List[float] = field(default_factory=list)
+    intercalations: List['IntercalationEvent'] = field(default_factory=list)
 
     def add_frame(self, frame: int, cells: Tuple[int, int], length: float, coords: np.ndarray) -> None:
         """Add data for a new frame"""

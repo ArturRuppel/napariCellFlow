@@ -259,8 +259,11 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
 
             # Convert lengths to physical units
             pixel_size = self.pixel_size_spin.value()
+            frame_length = self.frame_length_spin.value()
+
             for edge_data in results.edges.values():
                 edge_data.lengths = [length * pixel_size for length in edge_data.lengths]
+                edge_data.time_points = [frame * frame_length for frame in edge_data.frames]
 
             # Add segmentation data to results
             results.set_segmentation_data(self.segmentation_data)
@@ -815,11 +818,15 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         """Save simplified edge data to CSV file"""
         import csv
 
+        # Get physical units
+        frame_length = self.frame_length_spin.value()
+
         # Prepare CSV data
         csv_data = []
 
-        # Add header row
-        header = ['edge_id', 'frame', 'cell_id_1', 'cell_id_2', 'length_um', 'signed_length_um', 'has_intercalation']
+        # UPDATED header row to include time
+        header = ['edge_id', 'frame', 'time_min', 'cell_id_1', 'cell_id_2',
+                  'length_um', 'signed_length_um', 'has_intercalation']
         csv_data.append(header)
 
         # Process each edge
@@ -829,24 +836,26 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 cell_pair = edge.cell_pairs[frame_idx] if frame_idx < len(edge.cell_pairs) else [None, None]
                 length = edge.lengths[frame_idx] if frame_idx < len(edge.lengths) else 0.0
 
+                # CALCULATE actual time
+                time_minutes = frame * frame_length
+
                 # Determine if this frame has an intercalation event
                 has_intercalation = False
                 signed_length = length
 
                 # Check if there are intercalation events for this edge
                 if hasattr(edge, 'intercalations') and edge.intercalations:
-                    # Check if any intercalation occurs at this frame
                     for intercalation in edge.intercalations:
                         if hasattr(intercalation, 'frame') and intercalation.frame == frame:
                             has_intercalation = True
-                            # Make length negative to indicate intercalation
                             signed_length = -abs(length)
                             break
 
-                # Add row to CSV data
+                # UPDATED row to include time
                 row = [
                     str(edge_id),
                     int(frame),
+                    float(time_minutes),  # NEW: actual time in minutes
                     int(cell_pair[0]) if cell_pair[0] is not None else '',
                     int(cell_pair[1]) if cell_pair[1] is not None else '',
                     float(length),
@@ -855,7 +864,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                 ]
                 csv_data.append(row)
 
-        # Write CSV file
+        # Write CSV file (same as before)
         with open(csv_path, 'w', newline='', encoding='utf-8') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerows(csv_data)

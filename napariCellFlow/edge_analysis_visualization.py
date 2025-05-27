@@ -1,17 +1,13 @@
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 import imageio
-import napari
 import matplotlib.pyplot as plt
+import napari
 import numpy as np
-from matplotlib.animation import FuncAnimation, PillowWriter
-from matplotlib.colors import ListedColormap, hsv_to_rgb, Normalize
-from scipy.ndimage import binary_dilation
-from tqdm import tqdm
 
-from napariCellFlow.structure import VisualizationConfig, CellBoundary
+from napariCellFlow.structure import VisualizationConfig, CellBoundary, EdgeData
 
 logger = logging.getLogger(__name__)
 
@@ -590,12 +586,12 @@ class Visualizer:
         logger.debug("Cell track visualization completed")
 
     def create_edge_evolution_animation(self, segmentation_stack: np.ndarray,
-                                        trajectory: 'EdgeTrajectory',
+                                        trajectory: 'EdgeData',
                                         boundaries_by_frame: Dict[int, List['CellBoundary']],
                                         output_path: Path,
                                         example_num: int,
                                         total_examples: int) -> None:
-        """Create animation showing edge evolution and length plot with memory optimization."""
+        """Create animation showing edge evolution and length plot with memory optimization and proper physical units."""
         logger.debug("Starting edge evolution animation")
         self._update_progress("Edge Evolution Animation: Initializing...", 0)
 
@@ -619,14 +615,31 @@ class Visualizer:
 
             self._update_progress("Edge Evolution Animation: Validating trajectory data...", 5)
 
-            # Pre-calculate valid frame data
+            # Validate that trajectory has time_points data
+            if not hasattr(trajectory, 'time_points') or not trajectory.time_points:
+                raise ValueError("EdgeData must have time_points calculated during analysis")
+            if len(trajectory.time_points) != len(trajectory.frames):
+                raise ValueError("time_points and frames arrays must have same length")
+
+            # Pre-calculate valid frame data using existing time points
             valid_frame_data = {}
             if hasattr(trajectory, 'lengths') and hasattr(trajectory, 'frames'):
                 valid_indices = [i for i, f in enumerate(trajectory.frames)
                                  if 0 <= f < len(segmentation_stack)]
                 if valid_indices:
                     valid_frame_data['frames'] = [trajectory.frames[i] for i in valid_indices]
+                    valid_frame_data['time_points'] = [trajectory.time_points[i] for i in valid_indices]
                     valid_frame_data['lengths'] = [trajectory.lengths[i] for i in valid_indices]
+
+            # Pre-calculate intercalation time points using trajectory's time data
+            intercalation_times = []
+            if hasattr(trajectory, 'intercalations') and trajectory.intercalations:
+                for intercalation in trajectory.intercalations:
+                    if hasattr(intercalation, 'frame') and 0 <= intercalation.frame < len(segmentation_stack):
+                        # Find the time point for this frame
+                        if intercalation.frame in trajectory.frames:
+                            frame_idx = trajectory.frames.index(intercalation.frame)
+                            intercalation_times.append(trajectory.time_points[frame_idx])
 
             self._update_progress("Edge Evolution Animation: Starting frame generation...", 10)
 
@@ -659,7 +672,7 @@ class Visualizer:
                     # Plot segmentation
                     ax1.imshow(segmentation_stack[frame_idx], cmap='gray')
 
-                    # Plot edge if present
+                    # Plot edge if present in current frame
                     if frame_idx in trajectory.frames:
                         frame_data_idx = trajectory.frames.index(frame_idx)
                         if hasattr(trajectory, 'cell_pairs') and frame_data_idx < len(trajectory.cell_pairs):
@@ -671,30 +684,61 @@ class Visualizer:
                                         coords = boundary.coordinates
                                         if len(coords) > 0:
                                             ax1.plot(coords[:, 1], coords[:, 0], 'r-',
-                                                     linewidth=self.config.line_width)
+                                                     linewidth=self.config.line_width * 2,
+                                                     label=f'Edge {trajectory.edge_id}')
                                         break
 
-                    ax1.set_title(f'Frame {frame_idx}', color='black')
+                    ax1.set_title(f'Frame {frame_idx} (t = {trajectory.time_points[trajectory.frames.index(frame_idx)]:.1f} min)'
+                                  if frame_idx in trajectory.frames else f'Frame {frame_idx}', color='black')
                     ax1.axis('off')
 
-                    # Plot length trajectory
+                    # Plot length trajectory with proper time axis
                     if valid_frame_data:
-                        ax2.plot(valid_frame_data['frames'], valid_frame_data['lengths'], 'b-')
+                        # Plot full trajectory using time points
+                        ax2.plot(valid_frame_data['time_points'], valid_frame_data['lengths'], 'b-',
+                                 linewidth=2, alpha=0.8, label='Edge length')
+
+                        # Highlight current time point if it exists in the trajectory
                         if frame_idx in valid_frame_data['frames']:
                             idx = valid_frame_data['frames'].index(frame_idx)
-                            ax2.plot(frame_idx, valid_frame_data['lengths'][idx], 'ro')
+                            current_time = valid_frame_data['time_points'][idx]
+                            ax2.plot(current_time, valid_frame_data['lengths'][idx], 'ro',
+                                     markersize=8, label='Current time')
 
-                    # Add intercalation markers
-                    if hasattr(trajectory, 'intercalation_frames'):
-                        valid_intercalations = [f for f in trajectory.intercalation_frames
-                                                if 0 <= f < len(segmentation_stack)]
-                        for f in valid_intercalations:
-                            ax2.axvline(x=f, color='r', linestyle='--', alpha=0.5)
+                    # Add intercalation markers at proper time points
+                    for intercalation_time in intercalation_times:
+                        ax2.axvline(x=intercalation_time, color='r', linestyle='--',
+                                    alpha=0.7, linewidth=2, label='Intercalation' if intercalation_time == intercalation_times[0] else "")
 
-                    ax2.set_xlabel('Frame', color='black')
-                    ax2.set_ylabel('Edge Length (µm)', color='black')
+                    # Add vertical line for current time (if frame exists in trajectory)
+                    if frame_idx in trajectory.frames:
+                        frame_idx_in_traj = trajectory.frames.index(frame_idx)
+                        current_time = trajectory.time_points[frame_idx_in_traj]
+                        ax2.axvline(x=current_time, color='gray', linestyle='-', alpha=0.5, linewidth=1)
+
+                    # Proper axis labels with physical units
+                    ax2.set_xlabel('Time (min)', color='black', fontsize=12)
+                    ax2.set_ylabel('Edge Length (µm)', color='black', fontsize=12)
+                    ax2.set_title(f'Edge {trajectory.edge_id} Evolution', color='black', fontsize=14)
                     ax2.tick_params(colors='black')
                     ax2.grid(True, alpha=0.3)
+
+                    # Set reasonable axis limits
+                    if valid_frame_data:
+                        time_margin = max(valid_frame_data['time_points']) * 0.05
+                        ax2.set_xlim(min(valid_frame_data['time_points']) - time_margin,
+                                     max(valid_frame_data['time_points']) + time_margin)
+
+                        length_margin = (max(valid_frame_data['lengths']) - min(valid_frame_data['lengths'])) * 0.1
+                        ax2.set_ylim(min(valid_frame_data['lengths']) - length_margin,
+                                     max(valid_frame_data['lengths']) + length_margin)
+
+                    # Add legend if there are multiple elements
+                    handles, labels = ax2.get_legend_handles_labels()
+                    if handles:
+                        # Remove duplicate labels
+                        by_label = dict(zip(labels, handles))
+                        ax2.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=10)
 
                     # Convert plot to image
                     fig.canvas.draw()
@@ -738,7 +782,6 @@ class Visualizer:
         finally:
             # Ensure all figures are closed
             plt.close('all')
-
     def _create_example_visualizations(self, results: 'EdgeAnalysisResults', output_dir: Path) -> None:
         """Create example visualizations for edges with intercalations"""
         example_dir = output_dir
