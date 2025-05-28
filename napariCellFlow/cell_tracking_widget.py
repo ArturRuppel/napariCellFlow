@@ -173,7 +173,7 @@ class CellTrackingWidget(BaseAnalysisWidget):
         self.gap_frames_spin = QSpinBox()
         self.gap_frames_spin.setRange(0, int(1e4))
         self.gap_frames_spin.setSingleStep(1)
-        self.gap_frames_spin.setValue(1)  # Default value set to 1
+        self.gap_frames_spin.setValue(0)  # Default value set to 0
         self.gap_frames_spin.setToolTip("Maximum number of frames to look ahead for gap closing (0 to disable)")
 
         # Action buttons
@@ -334,7 +334,7 @@ class CellTrackingWidget(BaseAnalysisWidget):
         self.overlap_spin.setValue(self.tracking_params.min_overlap_ratio)
         self.displacement_spin.setValue(self.tracking_params.max_displacement)
         self.cell_size_spin.setValue(self.tracking_params.min_cell_size)
-        self.gap_frames_spin.setValue(1)  # Default value set to 1
+        self.gap_frames_spin.setValue(0)  # Default value set to 0
 
         # Reconnect signals
         self.overlap_spin.valueChanged.connect(self.update_parameters)

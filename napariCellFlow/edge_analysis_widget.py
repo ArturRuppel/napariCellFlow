@@ -825,8 +825,7 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
         csv_data = []
 
         # UPDATED header row to include time
-        header = ['edge_id', 'frame', 'time_min', 'cell_id_1', 'cell_id_2',
-                  'length_um', 'signed_length_um', 'has_intercalation']
+        header = ['edge_id', 'frame', 'time_min', 'cell_id_1', 'cell_id_2', 'signed_length_um', 'has_intercalation']
         csv_data.append(header)
 
         # Process each edge
@@ -858,7 +857,6 @@ class EdgeAnalysisWidget(BaseAnalysisWidget):
                     float(time_minutes),  # NEW: actual time in minutes
                     int(cell_pair[0]) if cell_pair[0] is not None else '',
                     int(cell_pair[1]) if cell_pair[1] is not None else '',
-                    float(length),
                     float(signed_length),
                     bool(has_intercalation)
                 ]
